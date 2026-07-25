@@ -39,6 +39,26 @@ pub mod base64data;
 pub mod certificate;
 pub mod variant;
 
+// Vendored google.rpc (status.proto), imported by the ConfidentialTransform
+// proto below. google.protobuf.* maps to prost_types by default.
+pub mod google {
+    pub mod rpc {
+        #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+        include_proto!("google.rpc");
+    }
+}
+
+// Vendored federated-compute ConfidentialTransform proto (wire-compatible; see
+// proto/confidentialcompute/BUILD). Kept out of `oak` since its package is
+// fcp.confidentialcompute; its cross-references to oak.crypto.v1 resolve against
+// the `oak` module below.
+pub mod fcp {
+    pub mod confidentialcompute {
+        #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+        include_proto!("fcp.confidentialcompute");
+    }
+}
+
 pub mod oak {
     // Do not lint generated code.
     #![allow(clippy::all, clippy::pedantic, clippy::nursery)]

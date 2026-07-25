@@ -16,11 +16,15 @@
 use oak_grpc_utils::{generate_grpc_code, CodegenOptions, ExternPath};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let included_protos = oak_proto_build_utils::get_common_proto_path("../..");
+    let mut included_protos = oak_proto_build_utils::get_common_proto_path("../..");
+    // The vendored ConfidentialTransform proto imports google/rpc/status.proto,
+    // which lives under third_party/.
+    included_protos.push(std::path::PathBuf::from("../../third_party"));
 
     // Generate gRPC code for Orchestrator services.
     generate_grpc_code(
         &[
+            "../../proto/confidentialcompute/confidential_transform.proto",
             "../../proto/containers/interfaces.proto",
             "../../proto/containers/orchestrator_crypto.proto",
             "../../proto/containers/hostlib_key_provisioning.proto",
@@ -35,9 +39,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CodegenOptions {
             build_client: true,
             build_server: true,
+            // The message types are generated in oak_proto_rust; only the service
+            // traits are generated here, referencing those.
             extern_paths: vec![
                 ExternPath::new(".oak", "::oak_proto_rust::oak"),
                 ExternPath::new(".perftools", "::oak_proto_rust::perftools"),
+                ExternPath::new(".fcp", "::oak_proto_rust::fcp"),
+                ExternPath::new(".google.rpc", "::oak_proto_rust::google::rpc"),
             ],
         },
     )?;

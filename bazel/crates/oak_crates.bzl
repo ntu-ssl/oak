@@ -632,7 +632,16 @@ OAK_STD_CRATES = _common_crates(std = True) | {
             "parallel-compilation",
             "pooling-allocator",
             "runtime",
+            # Needed by CFC wasm capability mode (cfc_wasm_capability): load and
+            # introspect WASI 0.2 components to derive capability claims.
+            "component-model",
         ],
+        version = "25.0.3",
+    ),
+    # WASI 0.2 (Preview 2) host implementation, pinned to wasmtime's version.
+    # Used by cfc_wasm_capability to provide (only) the input/output stream
+    # capabilities to confined wasm compute components.
+    "wasmtime-wasi": crate.spec(
         version = "25.0.3",
     ),
     "which": crate.spec(version = "5.0.0"),

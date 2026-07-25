@@ -13,6 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Vendored ConfidentialTransform gRPC service (messages live in
+// oak_proto_rust::fcp::confidentialcompute; only the service traits are here).
+pub mod fcp {
+    pub mod confidentialcompute {
+        #![allow(clippy::return_self_not_must_use)]
+        tonic::include_proto!("fcp.confidentialcompute");
+    }
+}
+
 pub mod oak {
     pub mod containers {
         #![allow(clippy::return_self_not_must_use)]

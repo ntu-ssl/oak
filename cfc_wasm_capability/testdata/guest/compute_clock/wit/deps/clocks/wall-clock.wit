@@ -1,0 +1,16 @@
+// Minimal vendored copy of the wasi:clocks/wall-clock interface (WASI 0.2.0),
+// enough to declare the import without fetching the full wasi wit tree.
+// wall-clock has no further dependencies (unlike monotonic-clock, which pulls
+// in wasi:io/poll).
+package wasi:clocks@0.2.0;
+
+interface wall-clock {
+  record datetime {
+    seconds: u64,
+    nanoseconds: u32,
+  }
+
+  now: func() -> datetime;
+
+  resolution: func() -> datetime;
+}

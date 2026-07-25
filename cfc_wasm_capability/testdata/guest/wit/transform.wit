@@ -1,0 +1,80 @@
+// Shared WIT for the Phase 1a toy composition (host-mediated adapter -> compute).
+//
+// Two interfaces in one package so the two guest crates share type definitions
+// without cross-package WIT dependencies:
+//   * `compute` is exported by the compute component (the pure computation).
+//   * `app`     is exported by the adapter component (the top-level entry the
+//               host calls); the adapter imports `compute` and the host wires
+//               the compute component's export to it via wasmtime's Linker.
+package cfc:transform@0.1.0;
+
+interface compute {
+  // Pure transformation: bytes in, bytes out. No ambient authority.
+  transform: func(input: list<u8>) -> list<u8>;
+}
+
+interface app {
+  // Top-level entry the host invokes.
+  run: func(input: list<u8>) -> list<u8>;
+}
+
+// World for the compute component: exports `compute`, imports nothing.
+world compute-world {
+  export compute;
+}
+
+// World for the adapter component: imports `compute` (satisfied at runtime by
+// the compute component through the host Linker) and exports `app`.
+world adapter-world {
+  import compute;
+  export app;
+}
+
+// ---------------------------------------------------------------------------
+// ConfidentialTransform session model (Phase 1b-B3).
+//
+// This mirrors the C++ ConfidentialTransform base/subclass split: the
+// orchestrator (the trusted host) is the base — it serves the gRPC Session
+// stream, decrypts input blobs, and encrypts/streams outputs — and the wasm
+// component is the subclass, implementing only the per-session business logic.
+// The wasm never holds keys or a socket; it emits results through the
+// host-provided `context` capability, which the orchestrator encrypts.
+// ---------------------------------------------------------------------------
+
+// Host-provided capability (implemented by the orchestrator) through which the
+// session emits results. The orchestrator does the encryption; the wasm only
+// hands over plaintext key/value pairs.
+interface context {
+  // An emitted output: an identifier and its plaintext bytes.
+  record kv {
+    key: string,
+    value: list<u8>,
+  }
+
+  // Emit a result blob in the clear (plaintext data plane / B3.2).
+  emit-unencrypted: func(kv: kv);
+
+  // Emit an intermediate result re-encrypted for the next pipeline stage.
+  // (Body wired in B3.3; declared now so the contract is frozen.)
+  emit-encrypted: func(reencryption-key-index: u32, kv: kv);
+
+  // Emit the final KMS-releasable result. (Body wired in B3.3.)
+  emit-releasable: func(reencryption-key-index: u32, kv: kv);
+}
+
+// The per-session business logic, implemented by the wasm component. Maps 1:1
+// to the C++ `Session` interface (Configure/Write/Commit/Finalize). `write`
+// receives plaintext: the orchestrator has already decrypted the blob.
+interface session {
+  configure: func(config: list<u8>);
+  write: func(data: list<u8>);
+  commit: func();
+  finalize: func();
+}
+
+// World for a ConfidentialTransform workload component: it imports the host
+// `context` capability and exports the `session` business logic.
+world session-world {
+  import context;
+  export session;
+}

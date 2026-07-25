@@ -76,6 +76,43 @@ pub fn create_container_event<A: Buf, B: Buf>(
     }
 }
 
+/// Creates a wasm-workload event that includes the workload bundle and
+/// configuration measurements, the instance public keys, and the (opaque to
+/// Oak) CFC capability claim describing what the attested wasm composition can
+/// do. Mirrors [`create_container_event`]; the extra `capability_claim` bytes
+/// are replayed verbatim into the DICE event log and interpreted only by CFC's
+/// KMS during key release.
+pub fn create_wasm_workload_event<A: Buf, B: Buf>(
+    bundle_bytes: A,
+    config_bytes: B,
+    capability_claim: alloc::vec::Vec<u8>,
+    instance_public_keys: &InstancePublicKeys,
+) -> Event {
+    let bundle_digest = oak_attestation::MeasureDigest::measure_digest(bundle_bytes);
+    let config_digest = oak_attestation::MeasureDigest::measure_digest(config_bytes);
+    Event {
+        tag: "ORCHESTRATOR".to_string(),
+        event: Some(prost_types::Any {
+            type_url: "type.googleapis.com/oak.attestation.v1.WasmWorkloadLayerData".to_string(),
+            value: oak_proto_rust::oak::attestation::v1::WasmWorkloadLayerData {
+                bundle: Some(bundle_digest),
+                config: Some(config_digest),
+                hybrid_encryption_public_key: instance_public_keys.encryption_public_key.to_vec(),
+                signing_public_key: instance_public_keys
+                    .signing_public_key
+                    .to_sec1_bytes()
+                    .to_vec(),
+                session_binding_public_key: instance_public_keys
+                    .session_binding_public_key
+                    .to_sec1_bytes()
+                    .to_vec(),
+                capability_claim,
+            }
+            .encode_to_vec(),
+        }),
+    }
+}
+
 /// Measures the provided event and returns as an additional CWT claim.
 pub fn create_container_dice_layer(event: &Event) -> oak_attestation::dice::LayerData {
     let encoded_event = event.encode_to_vec();
@@ -163,5 +200,48 @@ impl GroupKeys {
         peer_public_key: &[u8],
     ) -> anyhow::Result<EncryptedRequest> {
         self.encryption_key.encrypted_private_key(peer_public_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oak_proto_rust::oak::attestation::v1::WasmWorkloadLayerData;
+
+    use super::*;
+
+    #[test]
+    fn wasm_workload_event_round_trips() {
+        let (_instance_keys, public_keys) = generate_instance_keys();
+        let claim = b"cfc-wasm-claim-opaque-bytes".to_vec();
+
+        let event = create_wasm_workload_event(
+            &b"bundle-bytes"[..],
+            &b"config-bytes"[..],
+            claim.clone(),
+            &public_keys,
+        );
+
+        assert_eq!(event.tag, "ORCHESTRATOR");
+        let any = event.event.expect("event payload present");
+        assert_eq!(
+            any.type_url,
+            "type.googleapis.com/oak.attestation.v1.WasmWorkloadLayerData"
+        );
+
+        let decoded = WasmWorkloadLayerData::decode(&any.value[..]).expect("decodes");
+        assert!(decoded.bundle.is_some(), "bundle digest measured");
+        assert!(decoded.config.is_some(), "config digest measured");
+        // The claim bytes are replayed verbatim (opaque to Oak).
+        assert_eq!(decoded.capability_claim, claim);
+        // Fields 3-5 mirror ContainerLayerData so key extraction is identical.
+        assert_eq!(decoded.hybrid_encryption_public_key, public_keys.encryption_public_key);
+        assert_eq!(
+            decoded.signing_public_key,
+            public_keys.signing_public_key.to_sec1_bytes().to_vec()
+        );
+        assert_eq!(
+            decoded.session_binding_public_key,
+            public_keys.session_binding_public_key.to_sec1_bytes().to_vec()
+        );
     }
 }

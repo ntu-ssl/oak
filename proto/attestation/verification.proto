@@ -261,6 +261,38 @@ message ContainerLayerData {
   bytes session_binding_public_key = 5;
 }
 
+// Values extracted from the evidence that represents a confidential WebAssembly
+// workload run directly by the (measured, trusted) orchestrator instead of a
+// runc container. Fields 1-5 mirror ContainerLayerData exactly, so a verifier
+// that extracts the three instance public keys from a container layer works
+// unchanged for a wasm layer.
+message WasmWorkloadLayerData {
+  // Measurement RawDigest of the wasm workload bundle (tar of the manifest and
+  // the component *.wasm files).
+  RawDigest bundle = 1;
+
+  // Measurement RawDigest of the application configuration that selected and
+  // parameterized the wasm workload.
+  RawDigest config = 2;
+
+  // Key used to encrypt a single message with hybrid encryption before sending
+  // it to the enclave. This key must not be used to establish streaming
+  // sessions, and each new message must use a random nonce.
+  bytes hybrid_encryption_public_key = 3;
+
+  // Key used to verify artifacts signed by the TEE.
+  bytes signing_public_key = 4;
+
+  // Key used to verify that Noise session is bound to the evidence.
+  bytes session_binding_public_key = 5;
+
+  // Serialized fcp.confidentialcompute.WasmCapabilityClaim describing the
+  // capabilities the attested wasm composition can exercise. Opaque to Oak:
+  // Oak-proper stores and replays these bytes but never interprets them; CFC's
+  // KMS decodes and evaluates the claim during key release.
+  bytes capability_claim = 6;
+}
+
 // Event that contains public keys corresponding to key pairs generated at the
 // application layer.
 message ApplicationKeysData {

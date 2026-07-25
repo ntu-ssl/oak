@@ -1,0 +1,27 @@
+# Guest crate for the `concat` ConfidentialTransform session component, the wasm
+# port of containers/confidential_transform_test_concat's TestConcatSession. It
+# exports the `session` business logic and imports the host `context` capability
+# to emit its result. Built out-of-band with `cargo component build --release`;
+# the result is checked into ../../concat.wasm. Not part of the Bazel build.
+[package]
+name = "cfc-concat"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.35", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "cfc:transform"
+
+[package.metadata.component.target]
+path = "../wit"
+world = "session-world"
+
+[profile.release]
+strip = true
+lto = true

@@ -143,7 +143,7 @@ impl Qemu {
             params.memory_size.clone().unwrap_or("8G".to_string())
         );
         // SEV's feature configuration.
-        let sev_config_object = "id=sev0,cbitpos=51,reduced-phys-bits=1";
+        let sev_config_object = "id=sev0,cbitpos=51,reduced-phys-bits=6";
         // TDX machine suffix
         let tdx_machine_suffix = ",kernel_irqchip=split,memory-encryption=tdx,memory-backend=ram1";
         let tdx_common_object = format!(

@@ -1,0 +1,25 @@
+# Guest crate for the toy `compute` component (pure computation, no imports).
+# Built out-of-band with `cargo component build --release`; the resulting
+# component is checked into ../../compute.wasm. Not part of the Bazel build.
+[package]
+name = "cfc-compute"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.35", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "cfc:transform"
+
+[package.metadata.component.target]
+path = "../wit"
+world = "compute-world"
+
+[profile.release]
+strip = true
+lto = true

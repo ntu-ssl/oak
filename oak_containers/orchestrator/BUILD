@@ -26,12 +26,15 @@ rust_library(
     srcs = [
         "src/cdi.rs",
         "src/container_runtime.rs",
+        "src/confidential_transform.rs",
         "src/dice.rs",
         "src/ipc_server.rs",
         "src/key_provisioning.rs",
         "src/launcher_client.rs",
         "src/lib.rs",
         "src/logging.rs",
+        "src/transform_session.rs",
+        "src/wasm_runtime.rs",
     ],
     # TODO: b/368030563 - Remove this feature once all client library instances use
     # the applications keys from the event log.
@@ -39,6 +42,7 @@ rust_library(
         "application_keys",
     ],
     deps = [
+        "//cfc_wasm_capability",
         "//oak_attestation",
         "//oak_attestation_types",
         "//oak_attestation_verification",
@@ -75,6 +79,7 @@ rust_library(
         "@oak_crates_index//:tokio-util",
         "@oak_crates_index//:tonic",
         "@oak_crates_index//:walkdir",
+        "@oak_crates_index//:wasmtime",
         "@oak_crates_index//:zeroize",
     ],
 )
@@ -84,14 +89,18 @@ rust_library(
     srcs = [
         "src/cdi.rs",
         "src/container_runtime.rs",
+        "src/confidential_transform.rs",
         "src/dice.rs",
         "src/ipc_server.rs",
         "src/key_provisioning.rs",
         "src/launcher_client.rs",
         "src/lib.rs",
         "src/logging.rs",
+        "src/transform_session.rs",
+        "src/wasm_runtime.rs",
     ],
     deps = [
+        "//cfc_wasm_capability",
         "//oak_attestation",
         "//oak_attestation_types",
         "//oak_attestation_verification",
@@ -128,6 +137,7 @@ rust_library(
         "@oak_crates_index//:tokio-util",
         "@oak_crates_index//:tonic",
         "@oak_crates_index//:walkdir",
+        "@oak_crates_index//:wasmtime",
         "@oak_crates_index//:zeroize",
     ],
 )
@@ -146,6 +156,73 @@ rust_test(
     ],
     deps = [
         "//oak_file_utils",
+    ],
+)
+
+# Exercises the host-mediated composition runtime (wasm_runtime::Composition)
+# against the committed adapter->compute fixtures, with no VM. The .wasm are
+# provided as runfiles and read via oak_file_utils::data_path.
+rust_test(
+    name = "wasm_composition_test",
+    srcs = ["tests/wasm_composition.rs"],
+    data = [
+        "//cfc_wasm_capability:testdata_wasm",
+    ],
+    deps = [
+        ":oak_containers_orchestrator",
+        "//cfc_wasm_capability",
+        "//oak_file_utils",
+    ],
+)
+
+# Exercises the wasm ConfidentialTransform session driver (transform_session)
+# against the committed concat.wasm fixture: configure/write/finalize and the
+# host `context` emit capability, with no VM.
+rust_test(
+    name = "transform_session_test",
+    srcs = ["tests/transform_session.rs"],
+    data = [
+        "//cfc_wasm_capability:testdata_wasm",
+    ],
+    deps = [
+        ":oak_containers_orchestrator",
+        "//oak_file_utils",
+    ],
+)
+
+# Drives the plaintext ConfidentialTransform Session state machine
+# (confidential_transform) end to end over the proto messages against concat.wasm.
+rust_test(
+    name = "confidential_transform_test",
+    srcs = ["tests/confidential_transform.rs"],
+    data = [
+        "//cfc_wasm_capability:testdata_wasm",
+    ],
+    deps = [
+        ":oak_containers_orchestrator",
+        "//oak_file_utils",
+        "//oak_proto_rust",
+    ],
+)
+
+# End-to-end gRPC round trip: a tonic client drives the ConfidentialTransform
+# server (concat wasm session) over loopback TCP, exercising the real transport.
+rust_test(
+    name = "confidential_transform_grpc_test",
+    srcs = ["tests/confidential_transform_grpc.rs"],
+    data = [
+        "//cfc_wasm_capability:testdata_wasm",
+    ],
+    deps = [
+        ":oak_containers_orchestrator",
+        "//cfc_wasm_capability",
+        "//oak_file_utils",
+        "//oak_proto_rust",
+        "//oak_proto_rust/grpc",
+        "@oak_crates_index//:async-stream",
+        "@oak_crates_index//:tokio",
+        "@oak_crates_index//:tokio-stream",
+        "@oak_crates_index//:tonic",
     ],
 )
 

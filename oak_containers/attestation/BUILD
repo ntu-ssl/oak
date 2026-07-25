@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 package(
     default_visibility = ["//:default_visibility"],
@@ -44,4 +44,9 @@ rust_library(
 alias(
     name = "attestation",
     actual = ":oak_containers_attestation",
+)
+
+rust_test(
+    name = "oak_containers_attestation_test",
+    crate = ":oak_containers_attestation",
 )

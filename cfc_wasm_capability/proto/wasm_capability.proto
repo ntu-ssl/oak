@@ -1,0 +1,128 @@
+//
+// Copyright 2026 Confidential Federated Compute Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+// CFC-owned capability claim schema for confidential WebAssembly workloads.
+//
+// This schema is deliberately CFC-scoped, NOT part of Oak-proper: Oak stays
+// policy-agnostic and carries the serialized claim as opaque bytes inside the
+// `WasmWorkloadLayerData` DICE event. Only the relying party (the CFC KMS)
+// decodes and evaluates it.
+//
+// Package name is kept as `fcp.confidentialcompute` so this proto can later be
+// promoted verbatim to
+// `federated-compute/fcp/protos/confidentialcompute/wasm_capability.proto`
+// (Phase 1b/2) and shared by both the Oak orchestrator and the CFC KMS without
+// a rename. For Phase 1a it lives inside the `cfc_wasm_capability` crate.
+package fcp.confidentialcompute;
+
+// The capability claim describing what a wasm workload composition can do.
+//
+// The claim travels inside the measured DICE event log; the layer certificate
+// commits to the event digest, and the chain roots in the hardware report. It
+// therefore carries no signature, nonce, session id, or timestamp of its own.
+message WasmCapabilityClaim {
+  // Schema identifier; an unknown value is rejected by the KMS.
+  string schema_version = 1;  // "cfc-wasm-claim-v1"
+
+  // Stable identifier for a private release. SHA-256 over the sorted component
+  // (id, role, digest) triples || canonical graph || canonical granted-
+  // capability set || runtime config. Computed from the exact in-memory bytes
+  // the orchestrator instantiates. See overall plan sections 6 and 7.3.
+  bytes application_commitment = 2;
+
+  WasmRuntimeInfo runtime_info = 3;
+  CompositionGraph graph = 4;
+  repeated ComponentClaim components = 5;
+  repeated GrantedWasiCapability granted_capabilities = 6;
+  RuntimeProperties runtime_properties = 7;
+}
+
+// Identifies the runtime that produced (and will enforce) this claim.
+message WasmRuntimeInfo {
+  string engine = 1;          // "wasmtime"
+  string engine_version = 2;  // e.g. "25.0.3"
+  string wasi_version = 3;    // "0.2.x"
+  bool component_model = 4;    // must be true
+  bool dynamic_loading = 5;    // must be false
+}
+
+// One component instance in the composition.
+message ComponentClaim {
+  string id = 1;    // logical name from the manifest
+  string role = 2;  // "public_input_adapter" | "private_computation"
+                    // | "output_filter" | ...
+  bytes digest = 3;  // SHA-256 of the component binary
+  // If true, `digest` is omitted here and appears only inside the
+  // application_commitment preimage (the binary identity stays private).
+  bool confidential = 4;
+}
+
+// A single WASI capability granted to a component instance. Denials are
+// represented by absence from this list plus the RuntimeProperties tri-state;
+// there is intentionally no "denied capability" entry.
+message GrantedWasiCapability {
+  string interface = 1;          // e.g. "wasi:filesystem/types@0.2.0"
+  string component_id = 2;       // which instance received it
+  repeated string operations = 3;
+  repeated string resources = 4;  // logical handles: "input://client-dataset"
+
+  enum Provenance {
+    PROVENANCE_UNSPECIFIED = 0;
+    HOST_PROVIDED = 1;  // linked directly by the orchestrator
+    MEDIATED = 2;       // provided by another component (e.g. a filter)
+  }
+  Provenance provenance = 5;
+}
+
+// Coarse-grained ambient-authority properties of the whole composition.
+//
+// Tri-state on purpose: UNKNOWN (absent) is rejected by the KMS whenever the
+// policy requires DENIED. Absence is never silently treated as denial.
+message RuntimeProperties {
+  enum Enforcement {
+    UNKNOWN = 0;
+    DENIED = 1;
+    GRANTED = 2;
+  }
+  Enforcement network = 1;
+  Enforcement persistent_storage = 2;
+  Enforcement wall_clock = 3;
+  Enforcement randomness = 4;
+  Enforcement environment = 5;
+  Enforcement spawn = 6;
+}
+
+// The resolved, canonicalized wiring of the composition.
+//
+// Host-mediated wiring (not `wac` fusion): the orchestrator instantiates each
+// component separately and wires exports to imports itself, so per-component
+// boundaries and capability attribution are preserved and mediation is
+// provable. Distinguished endpoints model the external input/output the host
+// provides.
+message CompositionGraph {
+  // Logical component ids of the graph nodes, sorted byte-wise for
+  // canonicalization. Details of each node are in the `components` list.
+  repeated string nodes = 1;
+
+  message Edge {
+    string from = 1;       // producer component id, or "" for external_input
+    string to = 2;         // consumer component id, or "" for external_output
+    string interface = 3;  // fully-qualified "ns:pkg/iface@version"
+  }
+  // Edges sorted by (from, to, interface) for canonicalization.
+  repeated Edge edges = 2;
+}

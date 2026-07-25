@@ -1,0 +1,26 @@
+# Guest crate for the toy `adapter` component. It imports the `compute`
+# interface (satisfied at runtime by the compute component via the host Linker)
+# and exports `app.run`. Built out-of-band with `cargo component build
+# --release`; the result is checked into ../../adapter.wasm.
+[package]
+name = "cfc-adapter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.35", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "cfc:transform"
+
+[package.metadata.component.target]
+path = "../wit"
+world = "adapter-world"
+
+[profile.release]
+strip = true
+lto = true

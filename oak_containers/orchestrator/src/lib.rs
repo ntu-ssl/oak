@@ -28,12 +28,15 @@ use prost::Message;
 use tokio_util::sync::CancellationToken;
 
 mod cdi;
+pub mod confidential_transform;
 pub mod container_runtime;
 pub mod dice;
 pub mod ipc_server;
 pub mod key_provisioning;
 pub mod launcher_client;
 pub mod logging;
+pub mod transform_session;
+pub mod wasm_runtime;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -48,6 +51,11 @@ struct Args {
 
     #[arg(long, default_value = "/oak_utils/orchestrator_ipc")]
     ipc_socket_path: PathBuf,
+
+    /// Address the ConfidentialTransform gRPC service binds to for a wasm
+    /// session workload.
+    #[arg(long, default_value = "0.0.0.0:8888")]
+    confidential_transform_addr: String,
 
     #[arg(long, default_value = "oakc")]
     runtime_user: String,
@@ -111,14 +119,54 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .await
         .map_err(|error| anyhow!("couldn't get application config: {:?}", error))?;
 
-    // Create a container event and add it to the event log.
+    // Decide how to run this workload from the (measured) application config.
+    // A CFC wasm workload is selected via the OrchestratorWorkloadConfig
+    // envelope; anything else (including arbitrary legacy container config) falls
+    // through to the existing runc container path over the original raw bytes.
+    let workload_config = crate::wasm_runtime::decode_workload_config(&application_config);
+    let wasm_workload = crate::wasm_runtime::wasm_config(&workload_config).cloned();
+
+    // Create the appropriate workload event and add it to the event log. For a
+    // wasm workload we build the composition here (unpack + compile + derive the
+    // claim) ONCE, before extending the event, so what runs is exactly what is
+    // attested (no reload), and hold it to serve after evidence is sent.
     let mut attester: A = crate::dice::load_stage1_dice_data()?;
-    let container_event = oak_containers_attestation::create_container_event(
-        container_bundle.clone(),
-        &application_config[..],
-        &instance_public_keys,
-    );
-    let encoded_event = container_event.encode_to_vec();
+    let mut wasm_composition: Option<crate::wasm_runtime::Composition> = None;
+    let mut wasm_session: Option<Arc<crate::confidential_transform::SessionWorkload>> = None;
+    let workload_event = if let Some(ref wasm) = wasm_workload {
+        // A session-world workload is served over the ConfidentialTransform gRPC
+        // API; any other wasm workload runs as a pure-transform composition. Both
+        // compile the component(s) and derive the claim ONCE, before extend.
+        let claim_bytes = if crate::confidential_transform::is_session_workload(wasm) {
+            let files = crate::wasm_runtime::unpack_bundle(container_bundle.clone())
+                .context("couldn't unpack wasm workload bundle")?;
+            let workload = crate::confidential_transform::SessionWorkload::load(wasm, &files)
+                .context("couldn't load wasm session workload")?;
+            let claim_bytes = workload.claim_bytes().to_vec();
+            wasm_session = Some(Arc::new(workload));
+            claim_bytes
+        } else {
+            let composition =
+                crate::wasm_runtime::Composition::load_bundle(wasm, container_bundle.clone())
+                    .context("couldn't load wasm composition")?;
+            let claim_bytes = composition.claim_bytes().to_vec();
+            wasm_composition = Some(composition);
+            claim_bytes
+        };
+        oak_containers_attestation::create_wasm_workload_event(
+            container_bundle.clone(),
+            &application_config[..],
+            claim_bytes,
+            &instance_public_keys,
+        )
+    } else {
+        oak_containers_attestation::create_container_event(
+            container_bundle.clone(),
+            &application_config[..],
+            &instance_public_keys,
+        )
+    };
+    let encoded_event = workload_event.encode_to_vec();
     // Spawn the `extend`` operation on a separate thread to support cases where we
     // have async attesters.
     let attester = tokio::runtime::Handle::current()
@@ -139,7 +187,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             tokio::runtime::Handle::current()
                 .spawn_blocking(move || {
                     let container_layer =
-                        oak_containers_attestation::create_container_dice_layer(&container_event);
+                        oak_containers_attestation::create_container_dice_layer(&workload_event);
                     attester.add_application_keys(
                         container_layer,
                         &instance_public_keys.encryption_public_key,
@@ -166,6 +214,25 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .send_attestation_evidence(evidence.clone())
         .await
         .map_err(|error| anyhow!("couldn't send attestation evidence: {:?}", error))?;
+
+    // Confined wasm workload: the composition has been measured and its
+    // capability claim is now part of the evidence. Run it directly in the
+    // orchestrator (no runc container, so no container IPC server; single wasm
+    // TEE, so no group-key provisioning service). The container plumbing below
+    // is bypassed.
+    if let Some(workload) = wasm_session {
+        // Session workload: serve the ConfidentialTransform gRPC API.
+        return crate::confidential_transform::serve(
+            workload,
+            args.confidential_transform_addr
+                .parse()
+                .context("invalid --confidential_transform_addr")?,
+        )
+        .await;
+    }
+    if let Some(composition) = wasm_composition {
+        return composition.serve().await;
+    }
 
     // Request group keys.
     if key_provisioning_role == KeyProvisioningRole::Follower {

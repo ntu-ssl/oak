@@ -18,9 +18,13 @@ use std::collections::HashSet;
 use annotation::AnnotationInfo;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let included_protos = oak_proto_build_utils::get_common_proto_path("..");
+    let mut included_protos = oak_proto_build_utils::get_common_proto_path("..");
+    // The vendored ConfidentialTransform proto imports google/rpc/status.proto,
+    // which lives under third_party/.
+    included_protos.push(std::path::PathBuf::from("../third_party"));
 
     let proto_paths = [
+        "../proto/confidentialcompute/confidential_transform.proto",
         "../proto/attestation/assertion.proto",
         "../proto/attestation/attachment.proto",
         "../proto/attestation/cb_eventlog.proto",

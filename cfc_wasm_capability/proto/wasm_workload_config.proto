@@ -1,0 +1,82 @@
+// Copyright 2026 Confidential Federated Compute Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package fcp.confidentialcompute;
+
+// Envelope the orchestrator always decodes from the launcher-provided
+// application-config bytes to decide how to run the workload.
+//
+// The application config already flows over a measured channel
+// (GetApplicationConfig, measured into the attestation), so the workload kind is
+// covered by the evidence. `WORKLOAD_KIND_UNSPECIFIED` is the default: when the
+// bytes are legacy container config that do not decode to this envelope with a
+// WASM kind, the orchestrator ignores this message and runs the existing runc
+// container path over the original raw bytes.
+message OrchestratorWorkloadConfig {
+  enum WorkloadKind {
+    // Not a CFC wasm workload; run the existing runc container path.
+    WORKLOAD_KIND_UNSPECIFIED = 0;
+    WORKLOAD_KIND_CONTAINER = 1;
+    // Run the confined wasm component composition described by `wasm`.
+    WORKLOAD_KIND_WASM = 2;
+  }
+  WorkloadKind workload_kind = 1;
+
+  // Present iff workload_kind == WORKLOAD_KIND_WASM.
+  WasmWorkloadConfig wasm = 2;
+}
+
+// Describes a confined wasm component composition to run. The component binaries
+// themselves come from the container bundle (a tar); this config gives their
+// logical identities, where to find them in the bundle, and the host-mediated
+// wiring between them. The components are NEVER fused: each runs as its own
+// instance and the orchestrator satisfies every edge (see wasm_runtime.rs).
+message WasmWorkloadConfig {
+  // The components of the composition. Order is not significant; identity is by
+  // `id`.
+  repeated WasmComponentRef components = 1;
+
+  // Host-mediated wiring edges between components (NOT wac fusion). Each edge
+  // means `to` imports `interface` and the host satisfies it with `from`'s
+  // export. These are the same edges fed to capability derivation, which
+  // independently re-checks them against each component's resolved type tree.
+  repeated WasmCompositionEdge edges = 2;
+
+  // The component whose export the orchestrator invokes to drive the data plane,
+  // and the interface/function within it. E.g. entry_interface
+  // "cfc:transform/compute@0.1.0", entry_function "transform".
+  string entry_component = 3;
+  string entry_interface = 4;
+  string entry_function = 5;
+}
+
+message WasmComponentRef {
+  // Logical name from the manifest, stable across builds.
+  string id = 1;
+  // Role, e.g. "public_input_adapter".
+  string role = 2;
+  // Path within the bundle tar to this component's .wasm file.
+  string path = 3;
+}
+
+message WasmCompositionEdge {
+  // Producer component id; "" denotes the external (host) input endpoint.
+  string from = 1;
+  // Consumer component id; "" denotes the external (host) output endpoint.
+  string to = 2;
+  // WIT interface id satisfied across this edge, e.g. "cfc:transform/compute@0.1.0".
+  string interface = 3;
+}

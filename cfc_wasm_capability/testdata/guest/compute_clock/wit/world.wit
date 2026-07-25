@@ -1,0 +1,10 @@
+// A compute-style component that imports a single host WASI capability:
+// wasi:clocks/wall-clock. Used to verify that derivation flips exactly the
+// `wall_clock` runtime property to GRANTED (and records one HOST_PROVIDED
+// capability), leaving every other property DENIED.
+package cfc:clocktest@0.1.0;
+
+world clock-world {
+  import wasi:clocks/wall-clock@0.2.0;
+  export run: func(input: list<u8>) -> list<u8>;
+}
