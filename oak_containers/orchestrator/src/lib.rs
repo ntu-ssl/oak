@@ -53,8 +53,9 @@ struct Args {
     ipc_socket_path: PathBuf,
 
     /// Address the ConfidentialTransform gRPC service binds to for a wasm
-    /// session workload.
-    #[arg(long, default_value = "0.0.0.0:8888")]
+    /// session workload. Defaults to the port the Oak Containers launcher
+    /// proxies the trusted app on (VM_LOCAL_PORT).
+    #[arg(long, default_value = "0.0.0.0:8080")]
     confidential_transform_addr: String,
 
     #[arg(long, default_value = "oakc")]
@@ -221,14 +222,23 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
     // TEE, so no group-key provisioning service). The container plumbing below
     // is bypassed.
     if let Some(workload) = wasm_session {
-        // Session workload: serve the ConfidentialTransform gRPC API.
-        return crate::confidential_transform::serve(
-            workload,
-            args.confidential_transform_addr
-                .parse()
-                .context("invalid --confidential_transform_addr")?,
-        )
-        .await;
+        // Session workload: serve the ConfidentialTransform gRPC API. Bind the
+        // socket first, then notify the launcher that the app is ready (the
+        // container path does this over IPC via `notify_app_ready`; the wasm
+        // path has no container, so the orchestrator does it directly) so the
+        // launcher's `get_trusted_app_address` unblocks and proxies to us.
+        let addr: std::net::SocketAddr = args
+            .confidential_transform_addr
+            .parse()
+            .context("invalid --confidential_transform_addr")?;
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("couldn't bind ConfidentialTransform on {addr}"))?;
+        launcher_client
+            .notify_app_ready()
+            .await
+            .map_err(|error| anyhow!("couldn't notify app ready: {:?}", error))?;
+        return crate::confidential_transform::serve_on_listener(workload, listener).await;
     }
     if let Some(composition) = wasm_composition {
         return composition.serve().await;

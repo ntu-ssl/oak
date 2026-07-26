@@ -265,3 +265,19 @@ pub async fn serve(workload: Arc<SessionWorkload>, addr: std::net::SocketAddr) -
         .context("ConfidentialTransform server failed")?;
     Ok(())
 }
+
+/// As [`serve`], but on an already-bound listener. The orchestrator binds first
+/// and notifies the launcher (app-ready) before serving, so the launcher can
+/// proxy to a socket that is already listening.
+pub async fn serve_on_listener(
+    workload: Arc<SessionWorkload>,
+    listener: tokio::net::TcpListener,
+) -> Result<()> {
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    Server::builder()
+        .add_service(server(workload))
+        .serve_with_incoming(incoming)
+        .await
+        .context("ConfidentialTransform server failed")?;
+    Ok(())
+}
