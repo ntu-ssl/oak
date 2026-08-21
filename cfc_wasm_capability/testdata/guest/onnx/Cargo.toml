@@ -1,0 +1,40 @@
+# Guest crate for the `onnx` ConfidentialTransform session component: a confined
+# ONNX inference workload. It exports the same `session` business logic as
+# `concat` (configure/write/commit/finalize) and imports the host `context`
+# capability to emit its result, but the compute is an in-wasm ONNX inference
+# run via `tract` (pure Rust, no host ML backend / wasi-nn), so the model runs
+# entirely inside the TEE.
+#
+# Unlike `concat`, tract touches std machinery (HashMap seeding, timing) that
+# lowers to WASI imports, so the derived claim will honestly show wasi:random +
+# wasi:clocks where concat's showed none — and the orchestrator's session linker
+# must provide a locked-down (deny-all) WASI for it to instantiate.
+#
+# Built out-of-band with `cargo component build --release`; the result is checked
+# in as ../../onnx.wasm. Not part of the Bazel build.
+[package]
+name = "cfc-onnx"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.35", features = ["bitflags"] }
+# Pure-Rust ONNX inference; runs entirely in-wasm (no host backend).
+tract-onnx = "0.21"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "cfc:transform"
+
+[package.metadata.component.target]
+path = "../wit"
+world = "session-world"
+
+[profile.release]
+strip = true
+# tract is large; opt for size but keep it compiling.
+lto = true
+opt-level = "z"

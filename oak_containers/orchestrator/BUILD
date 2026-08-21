@@ -80,6 +80,7 @@ rust_library(
         "@oak_crates_index//:tonic",
         "@oak_crates_index//:walkdir",
         "@oak_crates_index//:wasmtime",
+        "@oak_crates_index//:wasmtime-wasi",
         "@oak_crates_index//:zeroize",
     ],
 )
@@ -138,6 +139,7 @@ rust_library(
         "@oak_crates_index//:tonic",
         "@oak_crates_index//:walkdir",
         "@oak_crates_index//:wasmtime",
+        "@oak_crates_index//:wasmtime-wasi",
         "@oak_crates_index//:zeroize",
     ],
 )

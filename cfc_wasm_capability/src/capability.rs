@@ -29,8 +29,8 @@ use wasmtime::Engine;
 
 use crate::proto::{
     composition_graph::Edge, granted_wasi_capability::Provenance, runtime_properties::Enforcement,
-    ComponentClaim, CompositionGraph, GrantedWasiCapability, RuntimeProperties, WasmCapabilityClaim,
-    WasmRuntimeInfo,
+    ComponentClaim, CompositionGraph, GrantedWasiCapability, RandomGrant, RuntimeProperties,
+    WasiRuntimeGrant, WasmCapabilityClaim, WasmRuntimeInfo,
 };
 
 /// Schema identifier emitted in every claim; the KMS rejects anything else.
@@ -101,7 +101,7 @@ pub fn derive_claim_with_engine(
         })
         .collect();
 
-    derive_claim_from_loaded(engine, &loaded, edges)
+    derive_claim_from_loaded(engine, &loaded, edges, None)
 }
 
 /// A component that the caller has already compiled, letting derivation reuse it
@@ -120,10 +120,19 @@ pub struct LoadedComponent<'a> {
 
 /// As [`derive_claim_with_engine`], but over already-compiled components so the
 /// caller avoids recompiling. `bytes` is still required for the component digest.
+///
+/// `grant` is the WASI capability grant the runtime will actually enforce (the
+/// declarative form of the orchestrator's `WasiCtx`). When `Some`, the derived
+/// `runtime_properties` report the *effective* authority — the intersection of
+/// what the components import with what the host grants — and the grant is
+/// embedded in the claim and folded into the commitment. When `None`, the
+/// derivation is purely static (a property is GRANTED iff a matching interface is
+/// imported), and no grant is recorded.
 pub fn derive_claim_from_loaded(
     engine: &Engine,
     components: &[LoadedComponent<'_>],
     edges: &[Edge],
+    grant: Option<&WasiRuntimeGrant>,
 ) -> Result<WasmCapabilityClaim> {
     if components.is_empty() {
         bail!("a composition must contain at least one component");
@@ -131,16 +140,10 @@ pub fn derive_claim_from_loaded(
 
     let mut component_claims = Vec::with_capacity(components.len());
     let mut granted = Vec::new();
-    // Start every ambient-authority property DENIED. A property is flipped to
-    // GRANTED only when a matching interface import is structurally present.
-    let mut props = RuntimeProperties {
-        network: Enforcement::Denied as i32,
-        persistent_storage: Enforcement::Denied as i32,
-        wall_clock: Enforcement::Denied as i32,
-        randomness: Enforcement::Denied as i32,
-        environment: Enforcement::Denied as i32,
-        spawn: Enforcement::Denied as i32,
-    };
+    // Which ambient-authority properties are *imported* by some component. This
+    // is the structural "ask"; the effective grant is computed against `grant`
+    // below.
+    let mut imported = ImportedProperties::default();
 
     for input in components {
         // Iterate the resolved import tree. Interface imports surface as
@@ -164,7 +167,7 @@ pub fn derive_claim_from_loaded(
                 // Otherwise the import must be satisfied by the host. Only
                 // host-provided imports represent real ambient authority.
                 if let Some(property) = classify_interface(import_name) {
-                    set_granted(&mut props, property);
+                    mark_imported(&mut imported, property);
                 }
                 granted.push(GrantedWasiCapability {
                     interface: import_name.to_string(),
@@ -207,8 +210,12 @@ pub fn derive_claim_from_loaded(
         dynamic_loading: false,
     };
 
+    // Coarse runtime properties: effective authority = imported AND (host grants
+    // it). With no grant, this collapses to "imported" (purely static).
+    let props = build_runtime_properties(&imported, grant);
+
     let application_commitment =
-        commitment(&component_claims, &graph, &granted, &runtime_info).to_vec();
+        commitment(&component_claims, &graph, &granted, &runtime_info, grant).to_vec();
 
     Ok(WasmCapabilityClaim {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -218,6 +225,7 @@ pub fn derive_claim_from_loaded(
         components: component_claims,
         granted_capabilities: granted,
         runtime_properties: Some(props),
+        wasi_runtime_grant: grant.cloned(),
     })
 }
 
@@ -253,15 +261,64 @@ enum RuntimeProperty {
     Spawn,
 }
 
-fn set_granted(props: &mut RuntimeProperties, property: RuntimeProperty) {
-    let granted = Enforcement::Granted as i32;
+/// Which ambient-authority properties are *imported* by some component (the
+/// structural "ask", before intersecting with what the host actually grants).
+#[derive(Default)]
+struct ImportedProperties {
+    network: bool,
+    persistent_storage: bool,
+    wall_clock: bool,
+    randomness: bool,
+    environment: bool,
+    spawn: bool,
+}
+
+fn mark_imported(imported: &mut ImportedProperties, property: RuntimeProperty) {
     match property {
-        RuntimeProperty::Network => props.network = granted,
-        RuntimeProperty::PersistentStorage => props.persistent_storage = granted,
-        RuntimeProperty::WallClock => props.wall_clock = granted,
-        RuntimeProperty::Randomness => props.randomness = granted,
-        RuntimeProperty::Environment => props.environment = granted,
-        RuntimeProperty::Spawn => props.spawn = granted,
+        RuntimeProperty::Network => imported.network = true,
+        RuntimeProperty::PersistentStorage => imported.persistent_storage = true,
+        RuntimeProperty::WallClock => imported.wall_clock = true,
+        RuntimeProperty::Randomness => imported.randomness = true,
+        RuntimeProperty::Environment => imported.environment = true,
+        RuntimeProperty::Spawn => imported.spawn = true,
+    }
+}
+
+/// Whether the host grant actually backs a property. With no grant (`None`),
+/// every imported property counts as granted — the purely static behavior.
+fn grant_provides(grant: Option<&WasiRuntimeGrant>, property: RuntimeProperty) -> bool {
+    let Some(g) = grant else { return true };
+    match property {
+        RuntimeProperty::Network => g.network,
+        RuntimeProperty::PersistentStorage => !g.preopens.is_empty(),
+        RuntimeProperty::WallClock => g.wall_clock,
+        RuntimeProperty::Randomness => g.random != RandomGrant::None as i32,
+        RuntimeProperty::Environment => !g.env_names.is_empty(),
+        // wasmtime-wasi provides no wasi:threads, so spawn is never backed.
+        RuntimeProperty::Spawn => false,
+    }
+}
+
+/// Effective runtime properties: GRANTED iff the property is imported *and* the
+/// host grant backs it (or there is no grant, i.e. purely static derivation).
+fn build_runtime_properties(
+    imported: &ImportedProperties,
+    grant: Option<&WasiRuntimeGrant>,
+) -> RuntimeProperties {
+    let eff = |imp: bool, prop: RuntimeProperty| -> i32 {
+        if imp && grant_provides(grant, prop) {
+            Enforcement::Granted as i32
+        } else {
+            Enforcement::Denied as i32
+        }
+    };
+    RuntimeProperties {
+        network: eff(imported.network, RuntimeProperty::Network),
+        persistent_storage: eff(imported.persistent_storage, RuntimeProperty::PersistentStorage),
+        wall_clock: eff(imported.wall_clock, RuntimeProperty::WallClock),
+        randomness: eff(imported.randomness, RuntimeProperty::Randomness),
+        environment: eff(imported.environment, RuntimeProperty::Environment),
+        spawn: eff(imported.spawn, RuntimeProperty::Spawn),
     }
 }
 
@@ -276,6 +333,7 @@ fn commitment(
     graph: &CompositionGraph,
     granted: &[GrantedWasiCapability],
     runtime_info: &WasmRuntimeInfo,
+    grant: Option<&WasiRuntimeGrant>,
 ) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(COMMITMENT_TAG.as_bytes());
@@ -311,6 +369,40 @@ fn commitment(
     update_bytes(&mut h, runtime_info.engine.as_bytes());
     update_bytes(&mut h, runtime_info.engine_version.as_bytes());
     update_bytes(&mut h, runtime_info.wasi_version.as_bytes());
+
+    // Canonical WASI runtime-grant encoding: a presence byte, then (when
+    // present) the grant fields in a fixed order with variable-length parts
+    // length-prefixed. Preopens and env names are sorted for canonicalization.
+    match grant {
+        None => h.update([0u8]),
+        Some(g) => {
+            h.update([1u8]);
+            let mut preopens: Vec<&crate::proto::Preopen> = g.preopens.iter().collect();
+            preopens.sort_by(|a, b| a.guest_path.cmp(&b.guest_path));
+            update_len(&mut h, preopens.len());
+            for p in preopens {
+                update_bytes(&mut h, p.guest_path.as_bytes());
+                h.update(p.dir_perms.to_le_bytes());
+                h.update(p.file_perms.to_le_bytes());
+            }
+            h.update([g.network as u8]);
+            let mut env: Vec<&String> = g.env_names.iter().collect();
+            env.sort();
+            update_len(&mut h, env.len());
+            for name in env {
+                update_bytes(&mut h, name.as_bytes());
+            }
+            update_len(&mut h, g.args.len());
+            for arg in &g.args {
+                update_bytes(&mut h, arg.as_bytes());
+            }
+            h.update(g.stdin.to_le_bytes());
+            h.update(g.stdout.to_le_bytes());
+            h.update(g.stderr.to_le_bytes());
+            h.update([g.wall_clock as u8, g.monotonic_clock as u8]);
+            h.update(g.random.to_le_bytes());
+        }
+    }
 
     h.finalize().into()
 }
@@ -400,21 +492,44 @@ mod tests {
     }
 
     #[test]
-    fn set_granted_flips_only_the_named_property() {
-        let mut props = RuntimeProperties {
-            network: Enforcement::Denied as i32,
-            persistent_storage: Enforcement::Denied as i32,
-            wall_clock: Enforcement::Denied as i32,
-            randomness: Enforcement::Denied as i32,
-            environment: Enforcement::Denied as i32,
-            spawn: Enforcement::Denied as i32,
-        };
-        set_granted(&mut props, RuntimeProperty::WallClock);
+    fn imported_only_grants_the_imported_property() {
+        // No grant => imported property is GRANTED, others DENIED (static mode).
+        let mut imported = ImportedProperties::default();
+        mark_imported(&mut imported, RuntimeProperty::WallClock);
+        let props = build_runtime_properties(&imported, None);
         assert!(granted(props.wall_clock));
         assert!(!granted(props.network));
         assert!(!granted(props.persistent_storage));
         assert!(!granted(props.randomness));
         assert!(!granted(props.environment));
         assert!(!granted(props.spawn));
+    }
+
+    #[test]
+    fn grant_intersects_imports_for_effective_properties() {
+        // A component that imports filesystem + clock, under a deny-all-ish grant
+        // that backs only the clock: filesystem resolves to DENIED (no preopens),
+        // clock stays GRANTED.
+        let mut imported = ImportedProperties::default();
+        mark_imported(&mut imported, RuntimeProperty::PersistentStorage);
+        mark_imported(&mut imported, RuntimeProperty::WallClock);
+
+        let grant = WasiRuntimeGrant {
+            preopens: vec![], // no filesystem reachable
+            network: false,
+            env_names: vec![],
+            args: vec![],
+            stdin: 0,
+            stdout: 0,
+            stderr: 0,
+            wall_clock: true,
+            monotonic_clock: true,
+            random: RandomGrant::Secure as i32,
+        };
+        let props = build_runtime_properties(&imported, Some(&grant));
+        assert!(!granted(props.persistent_storage), "no preopens => storage denied");
+        assert!(granted(props.wall_clock), "clock imported and granted");
+        // Not imported => denied regardless of grant.
+        assert!(!granted(props.randomness));
     }
 }

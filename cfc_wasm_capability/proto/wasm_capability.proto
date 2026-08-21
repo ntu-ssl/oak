@@ -49,6 +49,71 @@ message WasmCapabilityClaim {
   repeated ComponentClaim components = 5;
   repeated GrantedWasiCapability granted_capabilities = 6;
   RuntimeProperties runtime_properties = 7;
+
+  // The exact WASI grant the orchestrator's runtime enforces for this workload
+  // (the declarative configuration behind the wasmtime `WasiCtx`). This is the
+  // enforced *ceiling* of ambient authority, independent of what the components
+  // import. `runtime_properties` above is a coarse projection of the
+  // intersection of these grants with the imported interfaces. Absent when the
+  // claim was derived without a runtime grant (e.g. pure static analysis).
+  WasiRuntimeGrant wasi_runtime_grant = 8;
+}
+
+// The declarative WASI capability grant the runtime enforces: the attestable
+// projection of the host's `WasiCtx` configuration (host-only details such as
+// real filesystem paths and environment *values* are deliberately omitted).
+message WasiRuntimeGrant {
+  // Preopened directories handed to the guest. Empty => no filesystem reachable.
+  repeated Preopen preopens = 1;
+  // Whether network egress (wasi:sockets) is permitted. false => none reachable.
+  bool network = 2;
+  // Names (not values) of environment variables exposed. Empty => none.
+  repeated string env_names = 3;
+  // Command-line arguments exposed. Empty => none.
+  repeated string args = 4;
+  StdioGrant stdin = 5;
+  StdioGrant stdout = 6;
+  StdioGrant stderr = 7;
+  bool wall_clock = 8;
+  bool monotonic_clock = 9;
+  RandomGrant random = 10;
+}
+
+// A single preopened directory grant (guest view only; the host path is not
+// attested).
+message Preopen {
+  string guest_path = 1;
+  DirPerms dir_perms = 2;
+  FilePerms file_perms = 3;
+}
+
+enum StdioGrant {
+  STDIO_GRANT_UNSPECIFIED = 0;
+  STDIO_GRANT_CLOSED = 1;   // reads EOF / writes rejected
+  STDIO_GRANT_SINK = 2;     // writes accepted and discarded
+  STDIO_GRANT_INHERIT = 3;  // wired to the host process's stdio
+  STDIO_GRANT_PIPE = 4;     // wired to an in-memory pipe
+}
+
+enum RandomGrant {
+  RANDOM_GRANT_UNSPECIFIED = 0;
+  RANDOM_GRANT_NONE = 1;           // wasi:random not backed
+  RANDOM_GRANT_SECURE = 2;         // real CSPRNG
+  RANDOM_GRANT_DETERMINISTIC = 3;  // fixed/seeded (test only)
+}
+
+enum DirPerms {
+  DIR_PERMS_UNSPECIFIED = 0;
+  DIR_PERMS_NONE = 1;
+  DIR_PERMS_READ = 2;
+  DIR_PERMS_MUTATE = 3;  // read + create/delete/rename within the dir
+}
+
+enum FilePerms {
+  FILE_PERMS_UNSPECIFIED = 0;
+  FILE_PERMS_NONE = 1;
+  FILE_PERMS_READ = 2;
+  FILE_PERMS_WRITE = 3;  // read + write
 }
 
 // Identifies the runtime that produced (and will enforce) this claim.

@@ -17,20 +17,28 @@
 # wasi:clocks/wall-clock for `compute_clock`) -- which is the confinement the
 # capability model is about.
 #
+# EXCEPTION: `onnx` builds for wasm32-wasip1. Its ONNX engine (tract) needs std
+# machinery (HashMap seeding, timing) that only exists via WASI, so it cannot
+# build/run on wasm32-unknown-unknown. It is served by the orchestrator's
+# locked-down (deny-all) WASI linker (Phase 1c, Path B); its claim honestly shows
+# the broader wasi:cli/io/filesystem/clocks/random surface wasip1 pulls in.
+#
+# Requires the wasip1 target too:  rustup target add wasm32-wasip1
+#
 # Usage:  ./build.sh
 set -euo pipefail
 
-TARGET="wasm32-unknown-unknown"
+DEFAULT_TARGET="wasm32-unknown-unknown"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 testdata="$(cd "$here/.." && pwd)"
 
 build_one() {
-  local crate="$1" outname="$2"
-  echo ">>> building $crate"
-  ( cd "$here/$crate" && cargo component build --release --target "$TARGET" )
+  local crate="$1" outname="$2" target="${3:-$DEFAULT_TARGET}"
+  echo ">>> building $crate (target $target)"
+  ( cd "$here/$crate" && cargo component build --release --target "$target" )
   local wasm
-  wasm="$(find "$here/$crate/target/$TARGET" -name '*.wasm' -path '*release*' \
+  wasm="$(find "$here/$crate/target/$target" -name '*.wasm' -path '*release*' \
             ! -path '*deps*' | head -n1)"
   if [[ -z "${wasm}" ]]; then
     echo "ERROR: no .wasm produced for $crate" >&2
@@ -44,9 +52,11 @@ build_one compute       compute.wasm
 build_one adapter       adapter.wasm
 build_one compute_clock compute_clock.wasm
 build_one concat        concat.wasm
+build_one onnx          onnx.wasm         wasm32-wasip1
 
 echo
 echo "Done. Verify each is a component (layer=01) with, if available:"
 echo "  wasm-tools component wit $testdata/compute.wasm"
 echo "  wasm-tools component wit $testdata/adapter.wasm"
 echo "  wasm-tools component wit $testdata/compute_clock.wasm"
+echo "  wasm-tools component wit $testdata/onnx.wasm   # note the broad wasi imports"

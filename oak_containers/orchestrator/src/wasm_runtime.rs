@@ -145,7 +145,9 @@ impl Composition {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            derive_claim_from_loaded(&engine, &loaded, &edges)
+            // Pure-transform composition: static derivation, no WASI runtime
+            // grant (these components import no ambient WASI).
+            derive_claim_from_loaded(&engine, &loaded, &edges, None)
                 .context("wasm capability derivation failed")?
                 .encode_to_vec()
             // `loaded` (which borrows `components`) is dropped here, before the

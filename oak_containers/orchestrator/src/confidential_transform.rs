@@ -171,15 +171,18 @@ impl SessionWorkload {
         let engine = Engine::default();
         let component = Component::new(&engine, bytes).context("compiling session component")?;
 
-        // Derive the capability claim from the same compiled component (context
-        // import shows up as a host-provided capability; no ambient WASI).
+        // Derive the capability claim from the same compiled component, against
+        // the exact WASI grant the session runtime enforces. The grant is the
+        // single source of truth: `transform_session` builds the `WasiCtx` from
+        // it and the claim reports the effective (imported ∩ granted) authority.
         let loaded = [LoadedComponent {
             id: entry.id.clone(),
             role: entry.role.clone(),
             bytes,
             component: &component,
         }];
-        let claim_bytes = derive_claim_from_loaded(&engine, &loaded, &[])
+        let grant = crate::transform_session::session_wasi_grant();
+        let claim_bytes = derive_claim_from_loaded(&engine, &loaded, &[], Some(&grant))
             .context("wasm capability derivation failed")?
             .encode_to_vec();
 

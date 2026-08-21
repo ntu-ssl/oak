@@ -29,14 +29,61 @@
 //! actual HPKE/KMS crypto is deferred to B3.3.
 
 use anyhow::{bail, Context, Result};
+use cfc_wasm_capability::proto::{RandomGrant, StdioGrant, WasiRuntimeGrant};
 use wasmtime::{
     component::{Component, Func, Linker, Val},
     Engine, Store,
 };
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 /// WIT interface ids (see `testdata/guest/wit/transform.wit`).
 pub const SESSION_IFACE: &str = "cfc:transform/session@0.1.0";
 const CONTEXT_IFACE: &str = "cfc:transform/context@0.1.0";
+
+/// The exact WASI grant the confined session runtime enforces: deny-all except
+/// the clock and a secure RNG (which wasmtime-wasi always provides and which
+/// std-based compute genuinely needs). This is the **single source of truth**:
+/// it both builds the `WasiCtx` (via [`build_wasi_ctx`]) and is embedded into the
+/// attested capability claim, so the claim cannot misdescribe the runtime.
+///
+/// Widening it (preopens / network / env) means extending both this value and
+/// [`build_wasi_ctx`] together.
+pub fn session_wasi_grant() -> WasiRuntimeGrant {
+    WasiRuntimeGrant {
+        preopens: Vec::new(), // no filesystem reachable
+        network: false,       // no sockets
+        env_names: Vec::new(),
+        args: Vec::new(),
+        stdin: StdioGrant::Closed as i32,
+        stdout: StdioGrant::Sink as i32,
+        stderr: StdioGrant::Sink as i32,
+        wall_clock: true,
+        monotonic_clock: true,
+        random: RandomGrant::Secure as i32,
+    }
+}
+
+/// Builds the `WasiCtx` realizing `grant`. The deny-all grant maps exactly to
+/// `WasiCtxBuilder`'s defaults (stdin closed; stdout/stderr a discarding sink;
+/// real clock + secure RNG; no preopens/env/args/network); only non-default
+/// stdio is applied here. Preopens/network/env are asserted absent for now.
+fn build_wasi_ctx(grant: &WasiRuntimeGrant) -> WasiCtx {
+    debug_assert!(
+        grant.preopens.is_empty() && !grant.network && grant.env_names.is_empty(),
+        "build_wasi_ctx only realizes the deny-all grant; extend it before widening",
+    );
+    let mut b = WasiCtxBuilder::new();
+    if grant.stdin == StdioGrant::Inherit as i32 {
+        b.inherit_stdin();
+    }
+    if grant.stdout == StdioGrant::Inherit as i32 {
+        b.inherit_stdout();
+    }
+    if grant.stderr == StdioGrant::Inherit as i32 {
+        b.inherit_stderr();
+    }
+    b.build()
+}
 
 /// How a blob was emitted, mirroring the C++ `Context::Emit*` variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,11 +104,37 @@ pub struct EmittedBlob {
     pub kind: EmitKind,
 }
 
-/// Host state threaded through the wasm `Store`, so the `context` host functions
-/// can collect what the session emits.
-#[derive(Default)]
+/// Host state threaded through the wasm `Store`: the blobs the session emits via
+/// the `context` capability, plus a locked-down (deny-all) WASI context.
+///
+/// The WASI context grants no filesystem, network, environment, args, or stdio;
+/// it exists only so that std-based components (e.g. the ONNX workload, whose
+/// runtime seeds HashMaps from `wasi:random` and reads `wasi:clocks`) can
+/// instantiate at all. Whatever WASI a component actually imports is still
+/// surfaced honestly in its derived capability claim.
 struct SessionHostState {
     emitted: Vec<EmittedBlob>,
+    wasi: WasiCtx,
+    table: ResourceTable,
+}
+
+impl Default for SessionHostState {
+    fn default() -> Self {
+        Self {
+            emitted: Vec::new(),
+            wasi: build_wasi_ctx(&session_wasi_grant()),
+            table: ResourceTable::new(),
+        }
+    }
+}
+
+impl WasiView for SessionHostState {
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi
+    }
 }
 
 /// A loaded wasm ConfidentialTransform session, ready to be driven.
@@ -87,13 +160,20 @@ impl TransformSession {
     }
 
     /// Instantiates a fresh session from an already-compiled component, wiring
-    /// the host `context` capability. No ambient WASI is provided, so a component
-    /// that imports anything else fails closed.
+    /// the host `context` capability plus a locked-down (deny-all) WASI. A
+    /// component importing anything outside standard WASI + `context` still fails
+    /// closed; whatever WASI it does import is recorded in its capability claim.
     pub fn instantiate(engine: &Engine, component: &Component) -> Result<Self> {
         let mut store = Store::new(engine, SessionHostState::default());
 
         let mut linker: Linker<SessionHostState> = Linker::new(engine);
         Self::define_context(&mut linker).context("defining host context capability")?;
+        // Provide a locked-down WASI (deny-all: no fs/net/env/args/stdio) so
+        // std-based components can instantiate. Enforcement is preserved: a
+        // component importing anything outside standard WASI + `context` fails
+        // closed here.
+        wasmtime_wasi::add_to_linker_sync(&mut linker)
+            .context("adding locked-down WASI to linker")?;
 
         let instance =
             linker.instantiate(&mut store, component).context("instantiating session component")?;
