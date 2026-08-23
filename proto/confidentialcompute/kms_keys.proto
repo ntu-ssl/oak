@@ -1,0 +1,43 @@
+//
+// Copyright 2026 Confidential Federated Compute Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Minimal vendored subset of federated-compute's
+// fcp/protos/confidentialcompute/kms.proto, kept wire-compatible (identical
+// package and field numbers) so the oak orchestrator can decode the key bundle
+// the KMS releases to an authorized transform. Vendored because the dependency
+// runs fcp -> oak, so oak cannot depend back on federated-compute.
+//
+// This is the plaintext of the `EncryptedRequest` carried in
+// `InitializeRequest.protected_response`: the KMS encrypts a serialized
+// `AuthorizeConfidentialTransformResponse.ProtectedResponse` to the transform's
+// application encryption key. Nesting does not affect the wire format, so a
+// top-level message with the same field numbers decodes those bytes.
+
+syntax = "proto3";
+
+package fcp.confidentialcompute;
+
+// COSE keys the KMS releases to an authorized transform. See
+// AuthorizeConfidentialTransformResponse.ProtectedResponse in kms.proto.
+message ProtectedResponse {
+  // COSE_Key HPKE private keys (alg -65537,
+  // HPKE-Base-X25519-SHA256-AES128GCM) for decrypting inputs, identified by
+  // their COSE `kid`.
+  repeated bytes decryption_keys = 1;
+
+  // COSE_Key HPKE public keys for encrypting outputs, one per destination node
+  // id in the access policy, in order.
+  repeated bytes result_encryption_keys = 2;
+}

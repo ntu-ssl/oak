@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let proto_paths = [
         "../proto/confidentialcompute/confidential_transform.proto",
+        "../proto/confidentialcompute/kms_keys.proto",
         "../proto/attestation/assertion.proto",
         "../proto/attestation/attachment.proto",
         "../proto/attestation/cb_eventlog.proto",

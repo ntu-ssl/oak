@@ -37,3 +37,8 @@ proto_library(
         "@com_google_protobuf//:any_proto",
     ],
 )
+
+proto_library(
+    name = "kms_keys_proto",
+    srcs = ["kms_keys.proto"],
+)

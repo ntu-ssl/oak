@@ -26,10 +26,15 @@
 //! adds HPKE decrypt-before-write / encrypt-in-emit and the KMS handshake on
 //! this same state machine.
 
-use std::{collections::BTreeMap, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{bail, Context, Result};
 use cfc_wasm_capability::{derive_claim_from_loaded, proto::WasmWorkloadConfig, LoadedComponent};
+use oak_crypto::encryption_key::EncryptionKey;
 use oak_grpc::fcp::confidentialcompute::confidential_transform_server::{
     ConfidentialTransform, ConfidentialTransformServer,
 };
@@ -40,19 +45,24 @@ use tonic::{transport::Server, Request, Response, Status, Streaming};
 use wasmtime::{component::Component, Engine};
 
 use crate::{
+    transform_crypto::TransformKeys,
     transform_session::{TransformSession, SESSION_IFACE},
     wasm_runtime,
 };
 
 /// Drives a wasm session over the `ConfidentialTransform.Session` request/
-/// response protocol (plaintext path).
+/// response protocol.
 pub struct ConfidentialTransformSession {
     session: TransformSession,
+    /// The keys the KMS released for this transform, shared across all sessions.
+    /// `None` until a `StreamInitialize` with a `protected_response` arrives; in
+    /// that state only plaintext (`Unencrypted`) blobs can be written.
+    keys: Option<Arc<TransformKeys>>,
 }
 
 impl ConfidentialTransformSession {
-    pub fn new(session: TransformSession) -> Self {
-        Self { session }
+    pub fn new(session: TransformSession, keys: Option<Arc<TransformKeys>>) -> Self {
+        Self { session, keys }
     }
 
     /// Handles one `SessionRequest`, returning the `SessionResponse`s it
@@ -76,7 +86,7 @@ impl ConfidentialTransformSession {
     }
 
     fn write(&mut self, request: ct::WriteRequest) -> Result<Vec<ct::SessionResponse>> {
-        let plaintext = plaintext_data(&request)?;
+        let plaintext = self.decrypt_write(&request)?;
         let committed_size_bytes = plaintext.len() as i64;
         self.session.write(&plaintext)?;
         Ok(vec![wrap(ct::session_response::Kind::Write(ct::WriteFinishedResponse {
@@ -112,19 +122,27 @@ impl ConfidentialTransformSession {
     }
 }
 
-/// Extracts the plaintext bytes of a `WriteRequest`. On the plaintext path the
-/// blob must be `Unencrypted` (or carry no encryption metadata).
-fn plaintext_data(request: &ct::WriteRequest) -> Result<Vec<u8>> {
-    let encryption = request
-        .first_request_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.encryption_metadata.as_ref());
-    match encryption {
-        None | Some(ct::blob_metadata::EncryptionMetadata::Unencrypted(_)) => {
-            Ok(request.data.clone())
-        }
-        Some(ct::blob_metadata::EncryptionMetadata::HpkePlusAeadData(_)) => {
-            bail!("encrypted (HPKE) blobs are not supported on the plaintext path (B3.3)")
+impl ConfidentialTransformSession {
+    /// Returns the plaintext bytes a `WriteRequest` carries, decrypting an
+    /// `HpkePlusAead` blob with the KMS-released keys. An `Unencrypted` blob (or
+    /// one with no encryption metadata) passes through. An encrypted blob before
+    /// any keys were released is rejected.
+    fn decrypt_write(&self, request: &ct::WriteRequest) -> Result<Vec<u8>> {
+        let encryption = request
+            .first_request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.encryption_metadata.as_ref());
+        match encryption {
+            None | Some(ct::blob_metadata::EncryptionMetadata::Unencrypted(_)) => {
+                Ok(request.data.clone())
+            }
+            Some(ct::blob_metadata::EncryptionMetadata::HpkePlusAeadData(metadata)) => {
+                let keys = self.keys.as_ref().context(
+                    "received an encrypted blob but no keys were released; a StreamInitialize \
+                     carrying a protected_response is required first",
+                )?;
+                keys.decrypt_blob(metadata, &request.data)
+            }
         }
     }
 }
@@ -209,12 +227,27 @@ pub fn is_session_workload(wasm: &WasmWorkloadConfig) -> bool {
 /// The tonic `ConfidentialTransform` service backed by a wasm session workload.
 pub struct ConfidentialTransformService {
     workload: Arc<SessionWorkload>,
+    /// The transform's application encryption key, used to unwrap the KMS's
+    /// `protected_response` during `StreamInitialize`.
+    instance_key: EncryptionKey,
+    /// The keys released by the KMS, populated by `StreamInitialize` and shared
+    /// by every `Session` stream this service serves.
+    keys: Arc<Mutex<Option<Arc<TransformKeys>>>>,
 }
 
-/// Builds the tonic `ConfidentialTransform` server for `workload`. Exposed so
-/// tests can drive the service over an in-process channel.
-pub fn server(workload: Arc<SessionWorkload>) -> ConfidentialTransformServer<ConfidentialTransformService> {
-    ConfidentialTransformServer::new(ConfidentialTransformService { workload })
+/// Builds the tonic `ConfidentialTransform` server for `workload`. `instance_key`
+/// is the transform's application encryption key (the private half of the
+/// attested `hybrid_encryption_public_key`), used to unwrap the KMS's released
+/// keys. Exposed so tests can drive the service over an in-process channel.
+pub fn server(
+    workload: Arc<SessionWorkload>,
+    instance_key: EncryptionKey,
+) -> ConfidentialTransformServer<ConfidentialTransformService> {
+    ConfidentialTransformServer::new(ConfidentialTransformService {
+        workload,
+        instance_key,
+        keys: Arc::new(Mutex::new(None)),
+    })
 }
 
 #[tonic::async_trait]
@@ -223,11 +256,26 @@ impl ConfidentialTransform for ConfidentialTransformService {
         &self,
         request: Request<Streaming<ct::StreamInitializeRequest>>,
     ) -> Result<Response<ct::InitializeResponse>, Status> {
-        // Plaintext path: drain the initialization stream and acknowledge with an
-        // empty response. B3.3 returns the config-encryption key / protected
-        // response here.
+        // Unwrap the KMS's released keys from the `protected_response` carried in
+        // the `InitializeRequest`, and retain them for the Session streams. A
+        // stream with no `protected_response` leaves the transform in the
+        // plaintext-only state.
         let mut stream = request.into_inner();
-        while stream.message().await?.is_some() {}
+        while let Some(message) = stream.message().await? {
+            if let Some(ct::stream_initialize_request::Kind::InitializeRequest(init)) = message.kind
+            {
+                if let Some(protected_response) = init.protected_response {
+                    let keys = TransformKeys::from_protected_response(
+                        &protected_response,
+                        &self.instance_key,
+                    )
+                    .map_err(|e| {
+                        Status::invalid_argument(format!("invalid protected_response: {e:?}"))
+                    })?;
+                    *self.keys.lock().expect("keys mutex poisoned") = Some(Arc::new(keys));
+                }
+            }
+        }
         Ok(Response::new(ct::InitializeResponse::default()))
     }
 
@@ -241,7 +289,8 @@ impl ConfidentialTransform for ConfidentialTransformService {
             .workload
             .new_session()
             .map_err(|e| Status::internal(format!("couldn't start session: {e:?}")))?;
-        let mut handler = ConfidentialTransformSession::new(session);
+        let keys = self.keys.lock().expect("keys mutex poisoned").clone();
+        let mut handler = ConfidentialTransformSession::new(session, keys);
         let mut incoming = request.into_inner();
 
         let output = async_stream::try_stream! {
@@ -260,9 +309,13 @@ impl ConfidentialTransform for ConfidentialTransformService {
 
 /// Serves the ConfidentialTransform gRPC API for `workload` on `addr` until the
 /// process exits.
-pub async fn serve(workload: Arc<SessionWorkload>, addr: std::net::SocketAddr) -> Result<()> {
+pub async fn serve(
+    workload: Arc<SessionWorkload>,
+    instance_key: EncryptionKey,
+    addr: std::net::SocketAddr,
+) -> Result<()> {
     Server::builder()
-        .add_service(server(workload))
+        .add_service(server(workload, instance_key))
         .serve(addr)
         .await
         .context("ConfidentialTransform server failed")?;
@@ -274,11 +327,12 @@ pub async fn serve(workload: Arc<SessionWorkload>, addr: std::net::SocketAddr) -
 /// proxy to a socket that is already listening.
 pub async fn serve_on_listener(
     workload: Arc<SessionWorkload>,
+    instance_key: EncryptionKey,
     listener: tokio::net::TcpListener,
 ) -> Result<()> {
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     Server::builder()
-        .add_service(server(workload))
+        .add_service(server(workload, instance_key))
         .serve_with_incoming(incoming)
         .await
         .context("ConfidentialTransform server failed")?;

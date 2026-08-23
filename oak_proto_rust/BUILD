@@ -73,6 +73,7 @@ cargo_build_script(
         "//proto/attestation:tcb_version.proto",
         "//proto/attestation:verification.proto",
         "//proto/confidentialcompute:confidential_transform.proto",
+        "//proto/confidentialcompute:kms_keys.proto",
         "//proto/containers:hostlib_key_provisioning.proto",
         "//proto/containers:interfaces.proto",
         "//proto/containers:orchestrator_crypto.proto",

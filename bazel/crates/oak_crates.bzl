@@ -31,6 +31,14 @@ def _common_crates(std):
             ],
             version = "0.10.3",
         ),
+        "aes-gcm-siv": crate.spec(
+            default_features = False,
+            features = [
+                "aes",
+                "alloc",
+            ],
+            version = "0.11.1",
+        ),
         "aml": crate.spec(version = "0.16.4"),
         "anyhow": crate.spec(
             default_features = False,

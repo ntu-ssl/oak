@@ -65,7 +65,8 @@ fn finalize() -> ct::SessionRequest {
 #[test]
 fn plaintext_concat_session_end_to_end() {
     let session = TransformSession::load(&concat_wasm()).expect("load session");
-    let mut handler = ConfidentialTransformSession::new(session);
+    // No keys released: the plaintext path (Unencrypted blobs) only.
+    let mut handler = ConfidentialTransformSession::new(session, None);
 
     // Configure -> ConfigureResponse.
     let responses = handler.handle(configure()).expect("configure");

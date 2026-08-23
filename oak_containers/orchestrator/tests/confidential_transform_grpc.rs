@@ -90,9 +90,13 @@ async fn plaintext_session_over_grpc() {
             yield listener.accept().await.map(|(stream, _)| stream);
         }
     };
+    // Plaintext path: an instance key is required to construct the service, but
+    // no protected_response is sent, so no released keys are used.
+    let (instance_key, _instance_pub) =
+        oak_crypto::encryption_key::generate_encryption_key_pair();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(confidential_transform::server(workload))
+            .add_service(confidential_transform::server(workload, instance_key))
             .serve_with_incoming(incoming)
             .await
             .expect("server");

@@ -35,6 +35,7 @@ pub mod ipc_server;
 pub mod key_provisioning;
 pub mod launcher_client;
 pub mod logging;
+pub mod transform_crypto;
 pub mod transform_session;
 pub mod wasm_runtime;
 
@@ -238,7 +239,12 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             .notify_app_ready()
             .await
             .map_err(|error| anyhow!("couldn't notify app ready: {:?}", error))?;
-        return crate::confidential_transform::serve_on_listener(workload, listener).await;
+        return crate::confidential_transform::serve_on_listener(
+            workload,
+            instance_keys.encryption_key.clone(),
+            listener,
+        )
+        .await;
     }
     if let Some(composition) = wasm_composition {
         return composition.serve().await;
