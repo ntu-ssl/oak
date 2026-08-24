@@ -82,6 +82,12 @@ pub struct Params {
     /// SevSnp, or Tdx.
     #[arg(long, required = false, value_enum, default_value_t = VmType::Default)]
     pub vm_type: VmType,
+
+    /// Extra tokens appended to the guest kernel command line (space-separated),
+    /// e.g. "oak_log_level=debug". Lets the host pass runtime knobs into the
+    /// guest, readable there via /proc/cmdline.
+    #[arg(long, value_name = "ARGS")]
+    pub kernel_cmdline_extra: Option<String>,
 }
 
 pub enum Network {
@@ -265,7 +271,7 @@ impl Qemu {
             Network::Proxy { launcher_service_port, .. } => launcher_service_port,
             Network::Tap => VM_HOST_PORT,
         };
-        let cmdline = vec![
+        let mut cmdline = vec![
             params.telnet_console.map_or_else(|| "", |_| "debug").to_string(),
             "console=ttyS0".to_string(),
             "panic=-1".to_string(),
@@ -273,10 +279,17 @@ impl Qemu {
             format!("brd.rd_size={ramdrive_size}"),
             "brd.max_part=1".to_string(),
             "loglevel=7".to_string(),
-            "--".to_string(),
-            format!("--eth0-address={vm_address}/24"),
-            format!("--launcher-addr=vsock://{VMADDR_CID_HOST}:{launcher_service_port}"),
         ];
+        // Host-supplied extra kernel args (e.g. "oak_log_level=debug"), before the
+        // "--" so they land in the kernel-arg section of /proc/cmdline.
+        if let Some(extra) = params.kernel_cmdline_extra.as_deref() {
+            if !extra.trim().is_empty() {
+                cmdline.push(extra.trim().to_string());
+            }
+        }
+        cmdline.push("--".to_string());
+        cmdline.push(format!("--eth0-address={vm_address}/24"));
+        cmdline.push(format!("--launcher-addr=vsock://{VMADDR_CID_HOST}:{launcher_service_port}"));
 
         cmd.args(["-append", cmdline.join(" ").as_str()]);
 
