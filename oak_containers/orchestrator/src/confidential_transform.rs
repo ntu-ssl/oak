@@ -85,7 +85,7 @@ impl ConfidentialTransformSession {
         let config_len = config.len();
         let t = Instant::now();
         self.session.configure(&config)?;
-        log::debug!(
+        log::info!(
             "[timing] configure: session.configure ({config_len} B config) took {:.3} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
@@ -99,7 +99,7 @@ impl ConfidentialTransformSession {
         let committed_size_bytes = plaintext.len() as i64;
         let t_write = Instant::now();
         self.session.write(&plaintext)?;
-        log::debug!(
+        log::info!(
             "[timing] write: decrypt {committed_size_bytes} B in {decrypt_ms:.3} ms, \
              session.write took {:.3} ms",
             t_write.elapsed().as_secs_f64() * 1e3
@@ -113,7 +113,7 @@ impl ConfidentialTransformSession {
     fn commit(&mut self, _request: ct::CommitRequest) -> Result<Vec<ct::SessionResponse>> {
         let t = Instant::now();
         self.session.commit()?;
-        log::debug!("[timing] commit: session.commit took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+        log::info!("[timing] commit: session.commit took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
         Ok(vec![wrap(ct::session_response::Kind::Commit(ct::CommitResponse {
             status: Some(ok_status()),
             stats: None,
@@ -123,7 +123,7 @@ impl ConfidentialTransformSession {
     fn finalize(&mut self, _request: ct::FinalizeRequest) -> Result<Vec<ct::SessionResponse>> {
         let t = Instant::now();
         self.session.finalize()?;
-        log::debug!(
+        log::info!(
             "[timing] finalize: session.finalize took {:.3} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
@@ -209,13 +209,13 @@ impl SessionWorkload {
         })?;
 
         let engine = Engine::default();
-        log::debug!(
+        log::info!(
             "[timing]   Component::new: compiling {} B wasm (this is the heavy step)...",
             bytes.len()
         );
         let t = Instant::now();
         let component = Component::new(&engine, bytes).context("compiling session component")?;
-        log::debug!(
+        log::info!(
             "[timing]   Component::new (compile {} B wasm) took {:.3} ms",
             bytes.len(),
             t.elapsed().as_secs_f64() * 1e3
@@ -236,7 +236,7 @@ impl SessionWorkload {
         let claim_bytes = derive_claim_from_loaded(&engine, &loaded, &[], Some(&grant))
             .context("wasm capability derivation failed")?
             .encode_to_vec();
-        log::debug!(
+        log::info!(
             "[timing]   derive_claim_from_loaded took {:.3} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
@@ -310,7 +310,7 @@ impl ConfidentialTransform for ConfidentialTransformService {
                     .map_err(|e| {
                         Status::invalid_argument(format!("invalid protected_response: {e:?}"))
                     })?;
-                    log::debug!(
+                    log::info!(
                         "[timing] stream_initialize: unwrap KMS protected_response (release keys) \
                          took {:.3} ms",
                         t.elapsed().as_secs_f64() * 1e3
@@ -333,7 +333,7 @@ impl ConfidentialTransform for ConfidentialTransformService {
             .workload
             .new_session()
             .map_err(|e| Status::internal(format!("couldn't start session: {e:?}")))?;
-        log::debug!(
+        log::info!(
             "[timing] session: new_session (instantiate component) took {:.3} ms",
             t.elapsed().as_secs_f64() * 1e3
         );

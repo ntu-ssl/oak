@@ -96,7 +96,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
     let t_startup = Instant::now();
     let t = Instant::now();
     let (instance_keys, instance_public_keys) = generate_instance_keys();
-    log::debug!("[timing] generate_instance_keys took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+    log::info!("[timing] generate_instance_keys took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
     #[cfg(feature = "application_keys")]
     let (mut group_keys, group_public_keys) =
         if key_provisioning_role == KeyProvisioningRole::Leader {
@@ -120,7 +120,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .get_container_bundle()
         .await
         .map_err(|error| anyhow!("couldn't get container bundle: {:?}", error))?;
-    log::debug!(
+    log::info!(
         "[timing] get_container_bundle took {:.3} ms",
         t.elapsed().as_secs_f64() * 1e3
     );
@@ -129,7 +129,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .get_application_config()
         .await
         .map_err(|error| anyhow!("couldn't get application config: {:?}", error))?;
-    log::debug!(
+    log::info!(
         "[timing] get_application_config ({} B) took {:.3} ms",
         application_config.len(),
         t.elapsed().as_secs_f64() * 1e3
@@ -148,7 +148,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
     // attested (no reload), and hold it to serve after evidence is sent.
     let t = Instant::now();
     let mut attester: A = crate::dice::load_stage1_dice_data()?;
-    log::debug!("[timing] load_stage1_dice_data took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+    log::info!("[timing] load_stage1_dice_data took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
     let mut wasm_composition: Option<crate::wasm_runtime::Composition> = None;
     let mut wasm_session: Option<Arc<crate::confidential_transform::SessionWorkload>> = None;
     let workload_event = if let Some(ref wasm) = wasm_workload {
@@ -159,14 +159,14 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             let t = Instant::now();
             let files = crate::wasm_runtime::unpack_bundle(container_bundle.clone())
                 .context("couldn't unpack wasm workload bundle")?;
-            log::debug!(
+            log::info!(
                 "[timing] unpack_bundle took {:.3} ms",
                 t.elapsed().as_secs_f64() * 1e3
             );
             let t = Instant::now();
             let workload = crate::confidential_transform::SessionWorkload::load(wasm, &files)
                 .context("couldn't load wasm session workload")?;
-            log::debug!(
+            log::info!(
                 "[timing] SessionWorkload::load (compile + derive claim) took {:.3} ms",
                 t.elapsed().as_secs_f64() * 1e3
             );
@@ -206,7 +206,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             Ok::<A, anyhow::Error>(attester)
         })
         .await??;
-    log::debug!("[timing] attester.extend (DICE) took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+    log::info!("[timing] attester.extend (DICE) took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
 
     // Add the container event to the DICE chain.
     let t = Instant::now();
@@ -240,7 +240,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             tokio::runtime::Handle::current().spawn_blocking(move || attester.quote()).await??
         }
     };
-    log::debug!(
+    log::info!(
         "[timing] evidence generation (quote / add_application_keys) took {:.3} ms",
         t.elapsed().as_secs_f64() * 1e3
     );
@@ -250,7 +250,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .send_attestation_evidence(evidence.clone())
         .await
         .map_err(|error| anyhow!("couldn't send attestation evidence: {:?}", error))?;
-    log::debug!(
+    log::info!(
         "[timing] send_attestation_evidence took {:.3} ms; total orchestrator startup to \
          evidence-sent {:.3} ms",
         t.elapsed().as_secs_f64() * 1e3,

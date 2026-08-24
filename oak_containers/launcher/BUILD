@@ -34,6 +34,7 @@ rust_library(
         "//oak_launcher_utils",
         "//oak_proto_rust",
         "//oak_proto_rust/grpc",
+        "//oak_sev_snp_attestation_report",
         "@oak_crates_index//:anyhow",
         "@oak_crates_index//:async-stream",
         "@oak_crates_index//:bytes",
@@ -50,6 +51,7 @@ rust_library(
         "@oak_crates_index//:tokio-vsock",
         "@oak_crates_index//:tonic",
         "@oak_crates_index//:which",
+        "@oak_crates_index//:zerocopy",
     ],
 )
 

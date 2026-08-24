@@ -27,10 +27,14 @@ use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use oak_grpc::oak::key_provisioning::v1::key_provisioning_client::KeyProvisioningClient;
 use oak_proto_rust::oak::{
-    attestation::v1::{endorsements, Endorsements, Evidence, OakContainersEndorsements},
+    attestation::v1::{
+        endorsements, AmdSevSnpEndorsement, Endorsements, Evidence, OakContainersEndorsements,
+    },
     key_provisioning::v1::{GetGroupKeysRequest, GetGroupKeysResponse},
     session::v1::EndorsedEvidence,
+    Variant,
 };
+use oak_sev_snp_attestation_report::{AmdProduct, AttestationReport};
 pub use qemu::{Params as QemuParams, VmType as QemuVmType};
 use tokio::{
     net::TcpListener,
@@ -180,7 +184,9 @@ impl Launcher {
         let (shutdown_sender, mut shutdown_receiver) = watch::channel::<()>(());
         shutdown_receiver.mark_unchanged(); // Don't immediately notify on the initial value.
         let (app_notifier_sender, app_notifier_receiver) = oneshot::channel::<()>();
-        let endorsements = get_endorsements();
+        // No evidence yet at startup, so no VCEK; the gRPC GetEndorsedEvidence path
+        // rebuilds endorsements once the evidence has arrived (see below).
+        let endorsements = get_endorsements(None);
         let server = tokio::spawn(server::new(
             listener,
             vsock_listener,
@@ -291,7 +297,7 @@ impl Launcher {
                 .context("couldn't get attestation evidence before timeout")?
                 .context("no attestation evidence available")?;
 
-            let endorsements = get_endorsements();
+            let endorsements = get_endorsements(Some(&evidence));
 
             let endorsed_evidence =
                 EndorsedEvidence { evidence: Some(evidence), endorsements: Some(endorsements) };
@@ -346,7 +352,22 @@ impl Launcher {
     }
 }
 
-fn get_endorsements() -> Endorsements {
+fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
+    // Populate the platform endorsement with the machine-specific VCEK certificate so
+    // the relying party can verify the SEV-SNP report signature (ARK/ASK are long-lived
+    // and embedded in the verifier, so only the VCEK is needed). Best-effort: on any
+    // failure (e.g. no network to AMD KDS) we leave it empty and log a warning; the
+    // verifier will then reject the evidence if it requires the platform endorsement.
+    let platform: Option<Variant> = evidence.and_then(|e| match fetch_vcek(e) {
+        Ok(vcek) => {
+            log::info!("fetched VCEK ({} bytes); populating platform endorsement", vcek.len());
+            Some(AmdSevSnpEndorsement { tee_certificate: vcek }.into())
+        }
+        Err(err) => {
+            log::warn!("couldn't fetch VCEK; platform endorsement left empty: {err:#}");
+            None
+        }
+    });
     Endorsements {
         r#type: Some(endorsements::Type::OakContainers(OakContainersEndorsements {
             root_layer: None,
@@ -354,7 +375,65 @@ fn get_endorsements() -> Endorsements {
             system_layer: None,
             container_layer: None,
         })),
+        platform,
         // TODO: b/375137648 - Populate `events` proto field.
         ..Default::default()
     }
+}
+
+/// Fetches the AMD SEV-SNP VCEK certificate (DER) for the chip and TCB reported in
+/// `evidence`'s attestation report, from AMD's Key Distribution Service. The VCEK is
+/// public data whose authenticity is checked cryptographically by the verifier (ASK
+/// signs VCEK, VCEK signs the report), so fetching it over a plain `curl` is fine.
+fn fetch_vcek(evidence: &Evidence) -> anyhow::Result<Vec<u8>> {
+    use zerocopy::FromBytes;
+
+    let root_layer = evidence.root_layer.as_ref().context("evidence has no root layer")?;
+    let report = AttestationReport::ref_from_bytes(root_layer.remote_attestation_report.as_slice())
+        .map_err(|err| anyhow::anyhow!("couldn't parse AMD SEV-SNP report: {err}"))?;
+
+    // Derive the AMD product (Milan/Genoa/Turin) from the report's CPUID fields; the
+    // ARK/ASK for it are embedded in the verifier, so we only fetch the leaf VCEK.
+    let product = report.data.get_product();
+    let product_name = match product {
+        AmdProduct::Milan => "Milan",
+        AmdProduct::Genoa => "Genoa",
+        AmdProduct::Turin => "Turin",
+        AmdProduct::Unsupported => anyhow::bail!(
+            "unsupported AMD product (cpuid fam {:#x} mod {:#x})",
+            report.data.cpuid_fam_id,
+            report.data.cpuid_mod_id
+        ),
+    };
+    // Turin (and later) reports an 8-byte chip ID (rest zeroed); Milan/Genoa use 64.
+    let chip_id_len = if product == AmdProduct::Turin { 8 } else { 64 };
+    let chip_id: String =
+        report.data.chip_id[..chip_id_len].iter().map(|b| format!("{b:02x}")).collect();
+
+    let tcb = report.data.get_reported_tcb_version();
+    let mut url = format!(
+        "https://kdsintf.amd.com/vcek/v1/{product_name}/{chip_id}\
+         ?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
+        tcb.boot_loader, tcb.tee, tcb.snp, tcb.microcode,
+    );
+    // Turin's VCEK request additionally includes the FMC SPL.
+    if product == AmdProduct::Turin {
+        url.push_str(&format!("&fmcSPL={}", tcb.fmc));
+    }
+    log::info!("fetching VCEK from AMD KDS: {url}");
+
+    // `-f` makes an HTTP >= 400 (e.g. unknown chip/TCB) a non-zero exit; the VCEK
+    // endpoint returns the certificate DER-encoded on stdout.
+    let out = std::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "30", &url])
+        .output()
+        .context("running curl to fetch the VCEK")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "curl VCEK fetch failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    anyhow::ensure!(!out.stdout.is_empty(), "VCEK response was empty");
+    Ok(out.stdout)
 }
