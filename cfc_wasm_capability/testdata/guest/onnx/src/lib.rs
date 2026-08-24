@@ -88,12 +88,17 @@ impl Guest for Component {
         });
 
         let scores = output[0].to_array_view::<f32>().expect("read logits");
-        let (digit, confidence) = scores
+        // Argmax over the raw logits selects the digit. mnist-8 has no softmax
+        // layer, so convert the winning logit to a 0..1 confidence with a
+        // numerically-stable softmax (confidence = 1 / sum_j exp(s_j - max)).
+        let (digit, max_logit) = scores
             .iter()
             .cloned()
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .expect("non-empty logits");
+        let sum_exp: f32 = scores.iter().map(|s| (s - max_logit).exp()).sum();
+        let confidence = 1.0 / sum_exp;
 
         // Emit the prediction: [digit: u32 LE][confidence: f32 LE].
         let mut value = Vec::with_capacity(8);

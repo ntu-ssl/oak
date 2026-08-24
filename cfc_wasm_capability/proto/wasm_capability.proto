@@ -191,3 +191,114 @@ message CompositionGraph {
   // Edges sorted by (from, to, interface) for canonicalization.
   repeated Edge edges = 2;
 }
+
+// The relying party's policy over a `WasmCapabilityClaim`.
+//
+// This is the CFC KMS's authorization predicate for capability-gated key
+// release: instead of pinning an exact binary measurement, the KMS releases
+// keys to any confidential wasm workload whose attested claim satisfies this
+// matcher. It is carried in the access policy's `Transform.config_constraints`
+// (an existing `google.protobuf.Any`), so no federated-compute schema change is
+// required. The KMS decodes it during `match_transform` and fails closed on any
+// unmet constraint or on an absent/unknown claim.
+//
+// Deliberately does NOT match component `digest`s: pinning binary identity is
+// exactly the measurement model this replaces. The composition may be
+// confidential/undisclosed and is authorized by *what it can do* (its structure
+// and capabilities), not *which bytes it is*.
+//
+// Every field is "don't care" when left at its default, so an empty matcher
+// accepts any well-formed claim. All constraints are ANDed together.
+message WasmCapabilityMatcher {
+  // If non-empty, the claim's `schema_version` must equal this exactly.
+  string schema_version = 1;
+
+  // Per-property required enforcement over the claim's coarse
+  // `runtime_properties` projection. For each property set to DENIED or GRANTED
+  // here, the claim's corresponding property must match exactly; UNKNOWN (the
+  // default) means "don't care". Because the claim's tri-state treats UNKNOWN as
+  // "not proven", a required DENIED is only satisfied by a claim that positively
+  // proves DENIED, never by an absent/unknown value.
+  RuntimeProperties required_runtime_properties = 2;
+
+  // If true, the claim's `runtime_info.component_model` must be true.
+  bool require_component_model = 3;
+
+  // If true, the claim's `runtime_info.dynamic_loading` must be false.
+  bool forbid_dynamic_loading = 4;
+
+  // Fine-grained global interface denylist. Release is denied if ANY granted
+  // capability in the claim (held by any component) has an `interface` matching
+  // one of these patterns. This enforces per-interface denial the coarse
+  // `runtime_properties` projection cannot express. A pattern matches by exact
+  // string equality, or as a prefix when it ends with '*'
+  // (e.g. "wasi:sockets/*", "wasi:filesystem/*").
+  repeated string forbidden_interfaces = 5;
+
+  // Each role listed here must be held by at least one component in the claim
+  // (matched against `ComponentClaim.role`). Proves structural presence — e.g.
+  // that a mediating "output_filter" exists — without pinning binary identity.
+  // Empty => no structural role requirement.
+  repeated string required_component_roles = 6;
+
+  // Graph topology that MUST be present: each matcher must match at least one
+  // edge in the claim's `graph.edges`. Lets the policy require a specific wiring
+  // (e.g. the private component's output flows into the filter).
+  repeated EdgeMatcher required_edges = 7;
+
+  // Graph topology that MUST NOT be present: no edge in the claim's
+  // `graph.edges` may match any of these matchers. Bypass prevention — e.g.
+  // forbid any edge from the private component directly to external output.
+  repeated EdgeMatcher forbidden_edges = 8;
+
+  // Per-component capability constraints, keyed by component id.
+  repeated ComponentCapabilityRule component_rules = 9;
+}
+
+// A pattern over a `CompositionGraph.Edge`. Endpoints default to a wildcard;
+// the interface pattern defaults to "any". An edge matches only if all three
+// (from, to, interface) match.
+message EdgeMatcher {
+  EdgeEndpointMatcher from = 1;
+  EdgeEndpointMatcher to = 2;
+  // Interface pattern (exact, or trailing '*' prefix). Empty => any interface.
+  string interface = 3;
+}
+
+// Constrains one endpoint of an edge. Recall the claim models the external
+// input/output endpoints as the empty string "" in `Edge.from` / `Edge.to`.
+message EdgeEndpointMatcher {
+  enum Kind {
+    // Wildcard: matches any endpoint (the default).
+    ANY = 0;
+    // Matches only the external input/output endpoint (claim field == "").
+    EXTERNAL = 1;
+    // Matches only the component whose id equals `component_id` below.
+    COMPONENT = 2;
+  }
+  Kind kind = 1;
+  // The component id to match; used only when `kind == COMPONENT`.
+  string component_id = 2;
+}
+
+// Constrains the granted capabilities attributed to a single component. Applies
+// to every `GrantedWasiCapability` whose `component_id` equals `component_id`.
+// A component absent from the claim trivially satisfies every rule here (use
+// `required_component_roles` to force presence).
+message ComponentCapabilityRule {
+  // Which component this rule applies to (matches `ComponentClaim.id` /
+  // `GrantedWasiCapability.component_id`).
+  string component_id = 1;
+
+  // Allowlist: if non-empty, EVERY capability held by this component must have
+  // an `interface` matching one of these patterns (same '*' prefix semantics as
+  // `forbidden_interfaces`). Any capability outside the allowlist denies release.
+  repeated string allowed_interfaces = 2;
+
+  // Denylist: this component must hold NO capability whose `interface` matches
+  // one of these patterns.
+  repeated string forbidden_interfaces = 3;
+
+  // If true, this component must hold no granted capabilities at all.
+  bool forbid_all_capabilities = 4;
+}
