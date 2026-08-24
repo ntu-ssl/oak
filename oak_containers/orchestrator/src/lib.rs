@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{anyhow, Context};
 use clap::Parser;
@@ -93,7 +93,10 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         .map_err(|error| anyhow!("couldn't get key provisioning role: {:?}", error))?;
 
     // Generate application keys.
+    let t_startup = Instant::now();
+    let t = Instant::now();
     let (instance_keys, instance_public_keys) = generate_instance_keys();
+    log::info!("[timing] generate_instance_keys took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
     #[cfg(feature = "application_keys")]
     let (mut group_keys, group_public_keys) =
         if key_provisioning_role == KeyProvisioningRole::Leader {
@@ -112,14 +115,25 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         };
 
     // Load application.
+    let t = Instant::now();
     let container_bundle = launcher_client
         .get_container_bundle()
         .await
         .map_err(|error| anyhow!("couldn't get container bundle: {:?}", error))?;
+    log::info!(
+        "[timing] get_container_bundle took {:.3} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    let t = Instant::now();
     let application_config = launcher_client
         .get_application_config()
         .await
         .map_err(|error| anyhow!("couldn't get application config: {:?}", error))?;
+    log::info!(
+        "[timing] get_application_config ({} B) took {:.3} ms",
+        application_config.len(),
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     // Decide how to run this workload from the (measured) application config.
     // A CFC wasm workload is selected via the OrchestratorWorkloadConfig
@@ -132,7 +146,9 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
     // wasm workload we build the composition here (unpack + compile + derive the
     // claim) ONCE, before extending the event, so what runs is exactly what is
     // attested (no reload), and hold it to serve after evidence is sent.
+    let t = Instant::now();
     let mut attester: A = crate::dice::load_stage1_dice_data()?;
+    log::info!("[timing] load_stage1_dice_data took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
     let mut wasm_composition: Option<crate::wasm_runtime::Composition> = None;
     let mut wasm_session: Option<Arc<crate::confidential_transform::SessionWorkload>> = None;
     let workload_event = if let Some(ref wasm) = wasm_workload {
@@ -140,10 +156,20 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
         // API; any other wasm workload runs as a pure-transform composition. Both
         // compile the component(s) and derive the claim ONCE, before extend.
         let claim_bytes = if crate::confidential_transform::is_session_workload(wasm) {
+            let t = Instant::now();
             let files = crate::wasm_runtime::unpack_bundle(container_bundle.clone())
                 .context("couldn't unpack wasm workload bundle")?;
+            log::info!(
+                "[timing] unpack_bundle took {:.3} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+            let t = Instant::now();
             let workload = crate::confidential_transform::SessionWorkload::load(wasm, &files)
                 .context("couldn't load wasm session workload")?;
+            log::info!(
+                "[timing] SessionWorkload::load (compile + derive claim) took {:.3} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
             let claim_bytes = workload.claim_bytes().to_vec();
             wasm_session = Some(Arc::new(workload));
             claim_bytes
@@ -171,6 +197,7 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
     let encoded_event = workload_event.encode_to_vec();
     // Spawn the `extend`` operation on a separate thread to support cases where we
     // have async attesters.
+    let t = Instant::now();
     let attester = tokio::runtime::Handle::current()
         .spawn_blocking(move || {
             attester
@@ -179,8 +206,10 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             Ok::<A, anyhow::Error>(attester)
         })
         .await??;
+    log::info!("[timing] attester.extend (DICE) took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
 
     // Add the container event to the DICE chain.
+    let t = Instant::now();
     let evidence = {
         #[cfg(feature = "application_keys")]
         {
@@ -211,11 +240,22 @@ pub async fn main<A: Attester + ApplicationKeysAttester + Serializable + 'static
             tokio::runtime::Handle::current().spawn_blocking(move || attester.quote()).await??
         }
     };
+    log::info!(
+        "[timing] evidence generation (quote / add_application_keys) took {:.3} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
     // Send the attestation evidence to the Hostlib.
+    let t = Instant::now();
     launcher_client
         .send_attestation_evidence(evidence.clone())
         .await
         .map_err(|error| anyhow!("couldn't send attestation evidence: {:?}", error))?;
+    log::info!(
+        "[timing] send_attestation_evidence took {:.3} ms; total orchestrator startup to \
+         evidence-sent {:.3} ms",
+        t.elapsed().as_secs_f64() * 1e3,
+        t_startup.elapsed().as_secs_f64() * 1e3
+    );
 
     // Confined wasm workload: the composition has been measured and its
     // capability claim is now part of the evidence. Run it directly in the

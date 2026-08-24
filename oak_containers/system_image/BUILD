@@ -66,11 +66,29 @@ pkg_tar(
     package_dir = "/usr/bin",
 )
 
+# Debug/config overlay applied on top of the prebuilt base image (which is a pinned,
+# http_file-fetched tarball -- edits under base/files/ do NOT rebuild it; only a base
+# image rebuild + repin would). Files here are added by Bazel on every system image
+# build. The journald drop-in sorts after the base's `override.conf`, so its keys win.
+pkg_files(
+    name = "overlay_files",
+    srcs = ["overlay/etc/systemd/journald.conf.d/zz-debug-journal.conf"],
+    prefix = "/etc/systemd/journald.conf.d",
+    strip_prefix = "overlay/etc/systemd/journald.conf.d",
+)
+
+pkg_tar(
+    name = "overlay_tar",
+    srcs = [":overlay_files"],
+)
+
 pkg_tar(
     name = "oak_containers_system_image_tar",
     deps = [
         ":rust_bins_tar",
         "@oak_containers_system_image_base//file:base-image.tar.xz",
+        # Last so its files override same-path entries from the base image.
+        ":overlay_tar",
     ],
 )
 

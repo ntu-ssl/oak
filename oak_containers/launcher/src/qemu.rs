@@ -287,10 +287,24 @@ impl Qemu {
             tokio::spawn(async {
                 let mut reader = BufReader::new(host_socket);
 
-                let mut line = String::new();
-                while reader.read_line(&mut line).expect("couldn't read line") > 0 {
-                    print!("{}", line);
+                // Read raw bytes and convert lossily rather than `read_line` into a
+                // String: the guest console (kernel at loglevel=7, control sequences,
+                // etc.) can emit non-UTF-8 bytes, on which `read_line` returns
+                // InvalidData. The previous `.expect(...)` panicked on the first such
+                // byte, silently killing this task and dropping ALL subsequent guest
+                // output (e.g. everything the orchestrator logs after the wasm compile).
+                // `read_until` + `from_utf8_lossy` keeps forwarding through bad bytes.
+                let mut line = Vec::new();
+                loop {
                     line.clear();
+                    match reader.read_until(b'\n', &mut line) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => print!("{}", String::from_utf8_lossy(&line)),
+                        Err(e) => {
+                            eprintln!("error reading guest console: {e}");
+                            break;
+                        }
+                    }
                 }
             });
         }

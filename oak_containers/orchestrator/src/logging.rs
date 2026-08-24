@@ -34,8 +34,13 @@ pub fn setup() -> anyhow::Result<()> {
     let logger =
         syslog::unix(formatter).map_err(|e| anyhow!("impossible to connect to syslog: {:?}", e))?;
 
+    // Info (not Debug): at Debug the orchestrator's dependencies flood the volatile
+    // journal (~tens of thousands of entries per run), which rotates mid-run and drops
+    // the tail of our logs before oak_containers_syslogd can export them. The [timing]
+    // and other orchestrator logs of interest are INFO. See
+    // docs/orchestrator-log-drops-journald.md.
     log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Debug))
+        .map(|()| log::set_max_level(LevelFilter::Info))
         .map_err(|e| anyhow!("failed to set logger: {:?}", e))?;
 
     Ok(())

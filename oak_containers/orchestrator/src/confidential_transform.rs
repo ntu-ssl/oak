@@ -30,6 +30,7 @@ use std::{
     collections::BTreeMap,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{bail, Context, Result};
@@ -81,14 +82,28 @@ impl ConfidentialTransformSession {
 
     fn configure(&mut self, request: ct::ConfigureRequest) -> Result<Vec<ct::SessionResponse>> {
         let config = request.configuration.map(|any| any.value).unwrap_or_default();
+        let config_len = config.len();
+        let t = Instant::now();
         self.session.configure(&config)?;
+        log::info!(
+            "[timing] configure: session.configure ({config_len} B config) took {:.3} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
         Ok(vec![wrap(ct::session_response::Kind::Configure(ct::ConfigureResponse::default()))])
     }
 
     fn write(&mut self, request: ct::WriteRequest) -> Result<Vec<ct::SessionResponse>> {
+        let t_decrypt = Instant::now();
         let plaintext = self.decrypt_write(&request)?;
+        let decrypt_ms = t_decrypt.elapsed().as_secs_f64() * 1e3;
         let committed_size_bytes = plaintext.len() as i64;
+        let t_write = Instant::now();
         self.session.write(&plaintext)?;
+        log::info!(
+            "[timing] write: decrypt {committed_size_bytes} B in {decrypt_ms:.3} ms, \
+             session.write took {:.3} ms",
+            t_write.elapsed().as_secs_f64() * 1e3
+        );
         Ok(vec![wrap(ct::session_response::Kind::Write(ct::WriteFinishedResponse {
             committed_size_bytes,
             status: Some(ok_status()),
@@ -96,7 +111,9 @@ impl ConfidentialTransformSession {
     }
 
     fn commit(&mut self, _request: ct::CommitRequest) -> Result<Vec<ct::SessionResponse>> {
+        let t = Instant::now();
         self.session.commit()?;
+        log::info!("[timing] commit: session.commit took {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
         Ok(vec![wrap(ct::session_response::Kind::Commit(ct::CommitResponse {
             status: Some(ok_status()),
             stats: None,
@@ -104,7 +121,12 @@ impl ConfidentialTransformSession {
     }
 
     fn finalize(&mut self, _request: ct::FinalizeRequest) -> Result<Vec<ct::SessionResponse>> {
+        let t = Instant::now();
         self.session.finalize()?;
+        log::info!(
+            "[timing] finalize: session.finalize took {:.3} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
 
         let mut responses = Vec::new();
         for blob in self.session.take_emitted() {
@@ -187,7 +209,17 @@ impl SessionWorkload {
         })?;
 
         let engine = Engine::default();
+        log::info!(
+            "[timing]   Component::new: compiling {} B wasm (this is the heavy step)...",
+            bytes.len()
+        );
+        let t = Instant::now();
         let component = Component::new(&engine, bytes).context("compiling session component")?;
+        log::info!(
+            "[timing]   Component::new (compile {} B wasm) took {:.3} ms",
+            bytes.len(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
 
         // Derive the capability claim from the same compiled component, against
         // the exact WASI grant the session runtime enforces. The grant is the
@@ -200,9 +232,14 @@ impl SessionWorkload {
             component: &component,
         }];
         let grant = crate::transform_session::session_wasi_grant();
+        let t = Instant::now();
         let claim_bytes = derive_claim_from_loaded(&engine, &loaded, &[], Some(&grant))
             .context("wasm capability derivation failed")?
             .encode_to_vec();
+        log::info!(
+            "[timing]   derive_claim_from_loaded took {:.3} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
 
         Ok(Self { engine, component, claim_bytes })
     }
@@ -265,6 +302,7 @@ impl ConfidentialTransform for ConfidentialTransformService {
             if let Some(ct::stream_initialize_request::Kind::InitializeRequest(init)) = message.kind
             {
                 if let Some(protected_response) = init.protected_response {
+                    let t = Instant::now();
                     let keys = TransformKeys::from_protected_response(
                         &protected_response,
                         &self.instance_key,
@@ -272,6 +310,11 @@ impl ConfidentialTransform for ConfidentialTransformService {
                     .map_err(|e| {
                         Status::invalid_argument(format!("invalid protected_response: {e:?}"))
                     })?;
+                    log::info!(
+                        "[timing] stream_initialize: unwrap KMS protected_response (release keys) \
+                         took {:.3} ms",
+                        t.elapsed().as_secs_f64() * 1e3
+                    );
                     *self.keys.lock().expect("keys mutex poisoned") = Some(Arc::new(keys));
                 }
             }
@@ -285,10 +328,15 @@ impl ConfidentialTransform for ConfidentialTransformService {
         &self,
         request: Request<Streaming<ct::SessionRequest>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
+        let t = Instant::now();
         let session = self
             .workload
             .new_session()
             .map_err(|e| Status::internal(format!("couldn't start session: {e:?}")))?;
+        log::info!(
+            "[timing] session: new_session (instantiate component) took {:.3} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
         let keys = self.keys.lock().expect("keys mutex poisoned").clone();
         let mut handler = ConfidentialTransformSession::new(session, keys);
         let mut incoming = request.into_inner();
