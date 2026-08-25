@@ -392,8 +392,59 @@ fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
 /// Fetches the AMD SEV-SNP VCEK certificate (DER) for the chip and TCB reported in
 /// `evidence`'s attestation report, from AMD's Key Distribution Service. The VCEK is
 /// public data whose authenticity is checked cryptographically by the verifier (ASK
-/// signs VCEK, VCEK signs the report), so fetching it over a plain `curl` is fine.
+/// signs VCEK, VCEK signs the report), so obtaining it over a plain `curl` — or from a
+/// local file / cache — is fine.
+///
+/// Resilience against a flaky/unreachable KDS (the VCEK for a given chip+TCB is static):
+///  * `OAK_VCEK_FILE=/path/to.der` — read the DER locally and skip the network entirely.
+///  * On-disk cache under `$OAK_VCEK_DIR` (default `<tempdir>/oak_vcek`), keyed by the
+///    KDS URL: a successful fetch is written there, and a failed fetch falls back to it.
 fn fetch_vcek(evidence: &Evidence) -> anyhow::Result<Vec<u8>> {
+    // Explicit local override: bypass the network entirely.
+    if let Some(path) = std::env::var_os("OAK_VCEK_FILE") {
+        let path = std::path::PathBuf::from(path);
+        let der = std::fs::read(&path)
+            .with_context(|| format!("reading VCEK from OAK_VCEK_FILE={}", path.display()))?;
+        anyhow::ensure!(!der.is_empty(), "OAK_VCEK_FILE={} is empty", path.display());
+        log::info!("loaded VCEK ({} bytes) from OAK_VCEK_FILE={}", der.len(), path.display());
+        return Ok(der);
+    }
+
+    let url = vcek_url(evidence)?;
+    log::info!("fetching VCEK from AMD KDS: {url}");
+    let cache_path = vcek_cache_path(&url);
+
+    match fetch_vcek_from_kds(&url) {
+        Ok(der) => {
+            // Best-effort: prime the cache so future runs survive a KDS outage.
+            if let Some(path) = cache_path.as_ref() {
+                match std::fs::write(path, &der) {
+                    Ok(()) => log::info!("cached VCEK to {}", path.display()),
+                    Err(err) => log::warn!("couldn't write VCEK cache {}: {err}", path.display()),
+                }
+            }
+            Ok(der)
+        }
+        Err(fetch_err) => {
+            // Fall back to a previously cached VCEK for this exact chip+TCB, if any.
+            if let Some(path) = cache_path.as_ref() {
+                if let Ok(der) = std::fs::read(path) {
+                    if !der.is_empty() {
+                        log::warn!(
+                            "VCEK fetch failed ({fetch_err:#}); using cached VCEK from {}",
+                            path.display()
+                        );
+                        return Ok(der);
+                    }
+                }
+            }
+            Err(fetch_err)
+        }
+    }
+}
+
+/// Builds the AMD KDS VCEK request URL from the chip and TCB reported in `evidence`.
+fn vcek_url(evidence: &Evidence) -> anyhow::Result<String> {
     use zerocopy::FromBytes;
 
     let root_layer = evidence.root_layer.as_ref().context("evidence has no root layer")?;
@@ -428,12 +479,31 @@ fn fetch_vcek(evidence: &Evidence) -> anyhow::Result<Vec<u8>> {
     if product == AmdProduct::Turin {
         url.push_str(&format!("&fmcSPL={}", tcb.fmc));
     }
-    log::info!("fetching VCEK from AMD KDS: {url}");
+    Ok(url)
+}
 
-    // `-f` makes an HTTP >= 400 (e.g. unknown chip/TCB) a non-zero exit; the VCEK
-    // endpoint returns the certificate DER-encoded on stdout.
+/// The on-disk cache path for the VCEK identified by `url`. Directory is
+/// `$OAK_VCEK_DIR` (default `<tempdir>/oak_vcek`); the filename is the URL with every
+/// non-alphanumeric byte replaced by `_`, so it uniquely encodes chip+TCB. Returns
+/// `None` (caching disabled for this call) if the directory can't be created.
+fn vcek_cache_path(url: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("OAK_VCEK_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("oak_vcek"));
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        log::warn!("couldn't create VCEK cache dir {}: {err}", dir.display());
+        return None;
+    }
+    let key: String =
+        url.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    Some(dir.join(format!("{key}.der")))
+}
+
+/// Fetches the VCEK DER from AMD KDS with `curl`. `-f` turns an HTTP >= 400 (e.g. an
+/// unknown chip/TCB) into a non-zero exit; the endpoint returns the DER on stdout.
+fn fetch_vcek_from_kds(url: &str) -> anyhow::Result<Vec<u8>> {
     let out = std::process::Command::new("curl")
-        .args(["-fsS", "--max-time", "30", &url])
+        .args(["-fsS", "--max-time", "30", url])
         .output()
         .context("running curl to fetch the VCEK")?;
     anyhow::ensure!(
