@@ -28,7 +28,8 @@ use clap::{Parser, ValueEnum};
 use oak_grpc::oak::key_provisioning::v1::key_provisioning_client::KeyProvisioningClient;
 use oak_proto_rust::oak::{
     attestation::v1::{
-        endorsements, AmdSevSnpEndorsement, Endorsements, Evidence, OakContainersEndorsements,
+        endorsements, AmdSevSnpEndorsement, Endorsements, Evidence, FirmwareEndorsement,
+        OakContainersEndorsements,
     },
     key_provisioning::v1::{GetGroupKeysRequest, GetGroupKeysResponse},
     session::v1::EndorsedEvidence,
@@ -368,6 +369,12 @@ fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
             None
         }
     });
+    // The firmware (stage0) endorsement. `AmdSevSnpDiceAttestationVerifier::verify_firmware`
+    // requires `initial` to be `Some`, even when the stage0 reference value is `skip`
+    // (M3a uses skip; the empty `FirmwareEndorsement` is never inspected in that case).
+    // Gated on `evidence` so the pre-evidence placeholder endorsements stay minimal,
+    // mirroring `platform`. M3b will carry a real stage0 endorsement / `Digests` here.
+    let initial: Option<Variant> = evidence.map(|_| FirmwareEndorsement::default().into());
     Endorsements {
         r#type: Some(endorsements::Type::OakContainers(OakContainersEndorsements {
             root_layer: None,
@@ -376,6 +383,7 @@ fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
             container_layer: None,
         })),
         platform,
+        initial,
         // TODO: b/375137648 - Populate `events` proto field.
         ..Default::default()
     }
