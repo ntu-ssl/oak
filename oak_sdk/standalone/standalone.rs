@@ -78,6 +78,10 @@ pub struct StandaloneBuilder<'a> {
     encryption_key_pair: Option<(EncryptionKey, Vec<u8>)>,
     signing_key_pair: Option<(SigningKey, VerifyingKey)>,
     session_binding_key_pair: Option<(SigningKey, VerifyingKey)>,
+    /// When `Some`, the workload layer is emitted as a `WasmWorkloadLayerData` event
+    /// carrying these (opaque) capability-claim bytes, instead of the default
+    /// `ContainerLayerData` event. The DICE chain covers whichever event is produced.
+    wasm_workload_claim: Option<Vec<u8>>,
 }
 
 macro_rules! builder_param {
@@ -120,6 +124,7 @@ impl<'a> StandaloneBuilder<'a> {
             encryption_key_pair,
             signing_key_pair,
             session_binding_key_pair,
+            self.wasm_workload_claim,
         )
     }
 
@@ -130,6 +135,7 @@ impl<'a> StandaloneBuilder<'a> {
     builder_param!(encryption_key_pair: Option<(EncryptionKey, Vec<u8>)>);
     builder_param!(signing_key_pair: Option<(SigningKey, VerifyingKey)>);
     builder_param!(session_binding_key_pair: Option<(SigningKey, VerifyingKey)>);
+    builder_param!(wasm_workload_claim: Option<Vec<u8>>);
 
     pub fn new() -> StandaloneBuilder<'a> {
         StandaloneBuilder {
@@ -141,9 +147,11 @@ impl<'a> StandaloneBuilder<'a> {
             encryption_key_pair: None,
             signing_key_pair: None,
             session_binding_key_pair: None,
+            wasm_workload_claim: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         root_layer_event: oak_proto_rust::oak::attestation::v1::Stage0Measurements,
         stage1_system_image: &[u8],
@@ -152,6 +160,7 @@ impl<'a> StandaloneBuilder<'a> {
         encryption_key_pair: (EncryptionKey, Vec<u8>),
         signing_key_pair: (SigningKey, VerifyingKey),
         session_binding_key_pair: (SigningKey, VerifyingKey),
+        wasm_workload_claim: Option<Vec<u8>>,
     ) -> Result<Standalone> {
         let (encryption_key, encryption_public_key) = encryption_key_pair;
         let (signing_key, signing_public_key) = signing_key_pair;
@@ -190,19 +199,30 @@ impl<'a> StandaloneBuilder<'a> {
             .extend(&stage1_event.encode_to_vec())
             .context("couldn't add system event to the evidence")?;
 
-        // Add container event and add it to the event log.
-        let container_event = oak_containers_attestation::create_container_event(
-            application_image,
-            &application_config[..],
-            &instance_public_keys,
-        );
+        // Add the workload event and extend the DICE chain with it. By default this is a
+        // classic `ContainerLayerData` event; when a capability claim is supplied, it is a
+        // `WasmWorkloadLayerData` event instead (so the DICE chain genuinely covers a wasm
+        // workload, rather than the event being rewritten after the fact).
+        let workload_event = match wasm_workload_claim {
+            Some(claim) => oak_containers_attestation::create_wasm_workload_event(
+                application_image,
+                &application_config[..],
+                claim,
+                &instance_public_keys,
+            ),
+            None => oak_containers_attestation::create_container_event(
+                application_image,
+                &application_config[..],
+                &instance_public_keys,
+            ),
+        };
         attester
-            .extend(&container_event.encode_to_vec())
-            .context("couldn't add container event to the evidence")?;
+            .extend(&workload_event.encode_to_vec())
+            .context("couldn't add workload event to the evidence")?;
 
-        // Add container DICE layer data.
+        // Add the workload DICE layer data.
         let container_layer =
-            oak_containers_attestation::create_container_dice_layer(&container_event);
+            oak_containers_attestation::create_container_dice_layer(&workload_event);
 
         // Add application keys and generate the final evidence.
         #[allow(deprecated)]
