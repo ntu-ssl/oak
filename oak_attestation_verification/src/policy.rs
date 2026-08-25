@@ -23,3 +23,5 @@ pub mod kernel;
 pub mod platform;
 pub mod session_binding_public_key;
 pub mod system;
+pub mod wasm_workload;
+pub mod workload;

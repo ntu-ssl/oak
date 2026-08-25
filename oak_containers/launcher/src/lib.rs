@@ -375,6 +375,18 @@ fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
     // Gated on `evidence` so the pre-evidence placeholder endorsements stay minimal,
     // mirroring `platform`. M3b will carry a real stage0 endorsement / `Digests` here.
     let initial: Option<Variant> = evidence.map(|_| FirmwareEndorsement::default().into());
+
+    // Per-event endorsements. `AmdSevSnpDiceAttestationVerifier` runs the event-log
+    // policies only when `events` is non-empty; the software layers (kernel/system with
+    // `Digests`/`skip` reference values, and the measurement-agnostic wasm workload) need
+    // no endorsement content, so we emit one empty `Variant` per event. `verify_event_log`
+    // pads a short list, but matching the event-log length keeps the intent explicit.
+    // M3b will populate real per-layer endorsements here where measurement is enforced.
+    let events: Vec<Variant> = evidence
+        .and_then(|e| e.event_log.as_ref())
+        .map(|log| vec![Variant::default(); log.encoded_events.len()])
+        .unwrap_or_default();
+
     Endorsements {
         r#type: Some(endorsements::Type::OakContainers(OakContainersEndorsements {
             root_layer: None,
@@ -384,8 +396,7 @@ fn get_endorsements(evidence: Option<&Evidence>) -> Endorsements {
         })),
         platform,
         initial,
-        // TODO: b/375137648 - Populate `events` proto field.
-        ..Default::default()
+        events,
     }
 }
 

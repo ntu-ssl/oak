@@ -61,6 +61,8 @@ pub use policy::{
         SessionBindingPublicKeyVerificationReport,
     },
     system::SystemPolicy,
+    wasm_workload::WasmWorkloadPolicy,
+    workload::WorkloadPolicy,
 };
 pub use rekor::log_entry::verify_rekor_log_entry; // Exported utility function.
 pub use util::decode_event_proto;
